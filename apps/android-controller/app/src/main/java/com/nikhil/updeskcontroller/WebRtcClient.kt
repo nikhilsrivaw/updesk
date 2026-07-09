@@ -29,6 +29,7 @@ class WebRtcClient(
     private val renderer: SurfaceViewRenderer,
     private val onLocalIce: (JSONObject) -> Unit,
     private val onAnswerReady: (String) -> Unit,
+    private val onStatus: (String) -> Unit = {},
 ) {
     val eglBase: EglBase = EglBase.create()
     private lateinit var factory: PeerConnectionFactory
@@ -54,6 +55,7 @@ class WebRtcClient(
             .setVideoDecoderFactory(DefaultVideoDecoderFactory(eglBase.eglBaseContext))
             .createPeerConnectionFactory()
         renderer.init(eglBase.eglBaseContext, null)
+        renderer.setScalingType(org.webrtc.RendererCommon.ScalingType.SCALE_ASPECT_FIT)
         renderer.setEnableHardwareScaler(true)
     }
 
@@ -71,17 +73,17 @@ class WebRtcClient(
             }
             override fun onTrack(transceiver: org.webrtc.RtpTransceiver) {
                 val track = transceiver.receiver.track()
-                if (track is VideoTrack) track.addSink(renderer)
+                if (track is VideoTrack) { track.addSink(renderer); onStatus("video track received") }
             }
             override fun onDataChannel(dc: DataChannel) {
                 if (dc.label() == "input") inputChannel = dc
             }
             override fun onAddTrack(receiver: RtpReceiver, streams: Array<out MediaStream>) {
-                (receiver.track() as? VideoTrack)?.addSink(renderer)
+                (receiver.track() as? VideoTrack)?.let { it.addSink(renderer); onStatus("video track received") }
             }
             override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>) {}
             override fun onSignalingChange(s: PeerConnection.SignalingState?) {}
-            override fun onIceConnectionChange(s: PeerConnection.IceConnectionState?) {}
+            override fun onIceConnectionChange(s: PeerConnection.IceConnectionState?) { onStatus("ice: $s") }
             override fun onIceConnectionReceivingChange(b: Boolean) {}
             override fun onIceGatheringChange(s: PeerConnection.IceGatheringState?) {}
             override fun onAddStream(stream: MediaStream?) {}
@@ -90,16 +92,24 @@ class WebRtcClient(
             override fun onConnectionChange(newState: PeerConnection.PeerConnectionState?) {}
         }) ?: return
 
-        pc!!.setRemoteDescription(EmptySdp(), SessionDescription(SessionDescription.Type.OFFER, sdp))
-        pc!!.createAnswer(object : SdpObserver {
-            override fun onCreateSuccess(desc: SessionDescription) {
-                pc!!.setLocalDescription(EmptySdp(), desc)
-                onAnswerReady(desc.description)
+        // Sequence properly: setRemoteDescription is async — only createAnswer
+        // once it has actually applied, or the video m-line isn't negotiated.
+        pc!!.setRemoteDescription(object : SdpObserver {
+            override fun onSetSuccess() {
+                pc!!.createAnswer(object : SdpObserver {
+                    override fun onCreateSuccess(desc: SessionDescription) {
+                        pc!!.setLocalDescription(EmptySdp(), desc)
+                        onAnswerReady(desc.description)
+                    }
+                    override fun onSetSuccess() {}
+                    override fun onCreateFailure(error: String?) { onStatus("answer failed: $error") }
+                    override fun onSetFailure(error: String?) {}
+                }, MediaConstraints())
             }
-            override fun onSetSuccess() {}
-            override fun onCreateFailure(error: String?) {}
-            override fun onSetFailure(error: String?) {}
-        }, MediaConstraints())
+            override fun onCreateSuccess(p0: SessionDescription?) {}
+            override fun onCreateFailure(p0: String?) {}
+            override fun onSetFailure(error: String?) { onStatus("remote sdp failed: $error") }
+        }, SessionDescription(SessionDescription.Type.OFFER, sdp))
     }
 
     fun onRemoteIce(candidate: JSONObject) {

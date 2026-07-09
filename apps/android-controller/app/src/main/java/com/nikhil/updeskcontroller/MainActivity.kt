@@ -78,8 +78,9 @@ class MainActivity : AppCompatActivity(), SignalingClient.Listener {
             applicationContext, renderer,
             onLocalIce = { c -> signaling?.sendIce(sessionId, c) },
             onAnswerReady = { answer -> signaling?.sendAnswer(sessionId, answer) },
+            onStatus = { s -> ui.post { status.text = s } },
         ).also { it.init(); it.onRemoteOffer(sdp) }
-        status.text = "connected — live"
+        status.text = "negotiating…"
     } }
 
     override fun onIceCandidate(sessionId: String, candidate: JSONObject) { ui.post { rtc?.onRemoteIce(candidate) } }
