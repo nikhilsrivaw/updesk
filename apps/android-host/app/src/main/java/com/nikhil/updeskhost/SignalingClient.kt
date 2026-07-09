@@ -32,7 +32,11 @@ class SignalingClient(
         fun onError(message: String)
     }
 
-    private val http = OkHttpClient()
+    // pingInterval keeps the WebSocket alive so idle/hiccup drops ("Software
+    // caused connection abort") don't kill the session silently.
+    private val http = OkHttpClient.Builder()
+        .pingInterval(20, java.util.concurrent.TimeUnit.SECONDS)
+        .build()
     private var ws: WebSocket? = null
 
     fun connect() {
