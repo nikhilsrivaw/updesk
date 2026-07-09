@@ -1,5 +1,7 @@
 package com.nikhil.updeskhost
 
+import android.os.Handler
+import android.os.Looper
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -30,7 +32,14 @@ class SignalingClient(
         fun onIceCandidate(sessionId: String, candidate: JSONObject)
         fun onSessionEnded(sessionId: String)
         fun onError(message: String)
+        fun onReconnecting(attempt: Int) {}   // optional
+        fun onReconnected() {}                 // optional
     }
+
+    private val ui = Handler(Looper.getMainLooper())
+    private var deliberate = false
+    private var attempt = 0
+    private var everConnected = false
 
     // pingInterval keeps the WebSocket alive so idle/hiccup drops ("Software
     // caused connection abort") don't kill the session silently.
@@ -40,10 +49,17 @@ class SignalingClient(
     private var ws: WebSocket? = null
 
     fun connect() {
+        deliberate = false
+        openSocket()
+    }
+
+    private fun openSocket() {
         val req = Request.Builder().url(url).build()
         ws = http.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                // Kick off the handshake.
+                if (everConnected) ui.post { listener.onReconnected() }
+                everConnected = true
+                attempt = 0
                 send(
                     JSONObject()
                         .put("type", "auth_init")
@@ -55,10 +71,22 @@ class SignalingClient(
 
             override fun onMessage(webSocket: WebSocket, text: String) = handle(text)
 
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = scheduleReconnect()
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 listener.onError(t.message ?: "websocket failure")
+                scheduleReconnect()
             }
         })
+    }
+
+    // Reconnect with capped exponential backoff so a network hiccup doesn't drop
+    // the host off the grid — it re-auths + re-registers automatically.
+    private fun scheduleReconnect() {
+        if (deliberate) return
+        attempt++
+        val delay = minOf(15000L, 1000L * attempt)
+        ui.post { listener.onReconnecting(attempt) }
+        ui.postDelayed({ if (!deliberate) openSocket() }, delay)
     }
 
     private fun handle(text: String) {
@@ -109,7 +137,7 @@ class SignalingClient(
         JSONObject().put("type", "end_session").put("sessionId", sessionId)
     )
 
-    fun close() { ws?.close(1000, "bye"); ws = null }
+    fun close() { deliberate = true; ws?.close(1000, "bye"); ws = null }
 
     private fun send(o: JSONObject) { ws?.send(o.toString()) }
 }

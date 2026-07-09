@@ -115,7 +115,9 @@ class WebRtcClient(
                 val bytes = ByteArray(buffer.data.remaining())
                 buffer.data.get(bytes)
                 val json = runCatching { JSONObject(String(bytes, Charsets.UTF_8)) }.getOrNull() ?: return
-                InputAccessibilityService.instance?.handleInput(json)
+                // Root path (custody) if enabled + available, else Accessibility.
+                if (RootInput.enabled && RootInput.available) RootInput.handle(json)
+                else InputAccessibilityService.instance?.handleInput(json)
             }
             override fun onBufferedAmountChange(previousAmount: Long) {}
             override fun onStateChange() {}

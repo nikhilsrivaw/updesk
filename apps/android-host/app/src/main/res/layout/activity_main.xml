@@ -80,6 +80,13 @@
         android:text="@string/enable_files"
         android:layout_marginTop="8dp" />
 
+    <Button
+        android:id="@+id/rootBtn"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/use_root"
+        android:layout_marginTop="8dp" />
+
     <TextView
         android:id="@+id/status"
         android:layout_width="match_parent"

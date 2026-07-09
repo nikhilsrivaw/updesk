@@ -71,6 +71,24 @@ class MainActivity : AppCompatActivity(), SignalingClient.Listener {
         findViewById<Button>(R.id.enableControlBtn).setOnClickListener {
             startActivity(Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS))
         }
+        // Root input mode (custody devices) — checks root, toggles routing.
+        findViewById<Button>(R.id.rootBtn).setOnClickListener {
+            Thread {
+                val ok = RootInput.available
+                ui.post {
+                    if (!ok) { setStatus("root not available on this device") }
+                    else {
+                        RootInput.enabled = !RootInput.enabled
+                        if (RootInput.enabled) {
+                            val m = DisplayMetrics().also { @Suppress("DEPRECATION") windowManager.defaultDisplay.getRealMetrics(it) }
+                            RootInput.start(m.widthPixels, m.heightPixels)
+                        }
+                        findViewById<Button>(R.id.rootBtn).text =
+                            if (RootInput.enabled) "Root input: ON" else getString(R.string.use_root)
+                    }
+                }
+            }.start()
+        }
         // Grant full-storage access for the remote file browser.
         findViewById<Button>(R.id.enableFilesBtn).setOnClickListener {
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
@@ -168,6 +186,8 @@ class MainActivity : AppCompatActivity(), SignalingClient.Listener {
     } }
 
     override fun onError(message: String) { ui.post { setStatus("error: $message") } }
+    override fun onReconnecting(attempt: Int) { ui.post { setStatus("connection lost — reconnecting (try $attempt)…") } }
+    override fun onReconnected() { ui.post { setStatus("reconnected — online") } }
 
     private fun setStatus(s: String) { statusView.text = s }
     private fun genPin() = (1000 + Random.nextInt(9000)).toString()
