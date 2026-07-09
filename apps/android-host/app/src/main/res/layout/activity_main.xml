@@ -1,16 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/rootScroll"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:fillViewport="true"
+    android:clipToPadding="false"
     android:background="#0B0E14">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="20dp">
+        android:paddingLeft="20dp"
+        android:paddingRight="20dp"
+        android:paddingTop="48dp"
+        android:paddingBottom="24dp">
 
         <!-- Header -->
         <TextView
@@ -20,7 +25,7 @@
             android:textColor="#F1F5F9"
             android:textSize="24sp"
             android:textStyle="bold"
-            android:layout_marginTop="8dp" />
+            android:includeFontPadding="false" />
 
         <TextView
             android:layout_width="match_parent"
@@ -28,7 +33,8 @@
             android:text="@string/tagline"
             android:textColor="#8A97A8"
             android:textSize="13sp"
-            android:layout_marginTop="4dp"
+            android:lineSpacingExtra="2dp"
+            android:layout_marginTop="8dp"
             android:layout_marginBottom="20dp" />
 
         <!-- ID + PIN card -->
