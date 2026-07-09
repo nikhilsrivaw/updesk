@@ -7,7 +7,10 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.DisplayMetrics
+import android.view.View
 import android.widget.Button
+import android.widget.EditText
+import android.widget.ScrollView
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -67,6 +70,7 @@ class MainActivity : AppCompatActivity(), SignalingClient.Listener {
         findViewById<Button>(R.id.newPinBtn).setOnClickListener {
             currentPin = genPin(); pinView.text = currentPin
         }
+        findViewById<Button>(R.id.chatSend).setOnClickListener { sendChat() }
         // Open Accessibility settings so the user can enable remote-control input.
         findViewById<Button>(R.id.enableControlBtn).setOnClickListener {
             startActivity(Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS))
@@ -163,8 +167,9 @@ class MainActivity : AppCompatActivity(), SignalingClient.Listener {
                 onOfferReady = { sdp ->
                     signaling.respond(sessionId, true)  // accept
                     signaling.sendOffer(sessionId, sdp) // then the media offer
-                    ui.post { setStatus("sharing screen") }
+                    ui.post { setStatus("sharing screen"); showChat(true) }
                 },
+                onChat = { text -> ui.post { addChatMessage(false, text) } },
             ).also { it.init() }
             rtc!!.startSession(projectionData, metrics.widthPixels, metrics.heightPixels)
         } catch (t: Throwable) {
@@ -182,12 +187,51 @@ class MainActivity : AppCompatActivity(), SignalingClient.Listener {
         rtc?.stop(); rtc = null
         ScreenCaptureService.stop(this)
         pendingSessionId = null
+        showChat(false)
         setStatus("session ended — online")
     } }
 
     override fun onError(message: String) { ui.post { setStatus("error: $message") } }
     override fun onReconnecting(attempt: Int) { ui.post { setStatus("connection lost — reconnecting (try $attempt)…") } }
     override fun onReconnected() { ui.post { setStatus("reconnected — online") } }
+
+    // ---- chat ----
+    private fun showChat(show: Boolean) {
+        findViewById<View>(R.id.chatCard).visibility = if (show) View.VISIBLE else View.GONE
+        if (!show) findViewById<android.widget.LinearLayout>(R.id.chatMessages).removeAllViews()
+    }
+
+    private fun sendChat() {
+        val input = findViewById<EditText>(R.id.chatInput)
+        val text = input.text.toString().trim()
+        if (text.isEmpty()) return
+        rtc?.sendChat(text)
+        addChatMessage(true, text)
+        input.setText("")
+    }
+
+    private fun addChatMessage(mine: Boolean, text: String) {
+        val box = findViewById<android.widget.LinearLayout>(R.id.chatMessages)
+        val tv = TextView(this).apply {
+            this.text = text
+            setTextColor(if (mine) 0xFFFFFFFF.toInt() else 0xFFE8EAED.toInt())
+            setBackgroundColor(if (mine) 0xFF2563EB.toInt() else 0xFF232C3B.toInt())
+            setPadding(20, 12, 20, 12)
+            textSize = 14f
+        }
+        val lp = android.widget.LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+            android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            topMargin = 6
+            gravity = if (mine) android.view.Gravity.END else android.view.Gravity.START
+        }
+        box.addView(tv, lp)
+        // auto-scroll to bottom
+        findViewById<ScrollView>(R.id.chatScroll).post {
+            findViewById<ScrollView>(R.id.chatScroll).fullScroll(View.FOCUS_DOWN)
+        }
+    }
 
     private fun setStatus(s: String) { statusView.text = s }
     private fun genPin() = (1000 + Random.nextInt(9000)).toString()

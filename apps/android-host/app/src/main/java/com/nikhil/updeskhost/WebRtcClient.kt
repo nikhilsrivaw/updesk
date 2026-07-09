@@ -31,6 +31,7 @@ class WebRtcClient(
     private val context: Context,
     private val onLocalIce: (JSONObject) -> Unit,
     private val onOfferReady: (String) -> Unit,
+    private val onChat: (String) -> Unit = {},
 ) {
     private val eglBase: EglBase = EglBase.create()
     private lateinit var factory: PeerConnectionFactory
@@ -145,7 +146,10 @@ class WebRtcClient(
                 if (buffer.binary) return
                 val bytes = ByteArray(buffer.data.remaining()); buffer.data.get(bytes)
                 val m = runCatching { JSONObject(String(bytes, Charsets.UTF_8)) }.getOrNull() ?: return
-                if (m.optString("kind") == "quality") applyQuality(m.optString("profile"))
+                when (m.optString("kind")) {
+                    "quality" -> applyQuality(m.optString("profile"))
+                    "chat" -> onChat(m.optString("text"))
+                }
             }
             override fun onBufferedAmountChange(previousAmount: Long) {}
             override fun onStateChange() {}
@@ -175,6 +179,14 @@ class WebRtcClient(
             candidate.optString("candidate"),
         )
         pc?.addIceCandidate(c)
+    }
+
+    /** Send a chat message to the controller over the control channel. */
+    fun sendChat(text: String) {
+        val ch = controlChannel ?: return
+        if (ch.state() != DataChannel.State.OPEN) return
+        val o = JSONObject().put("kind", "chat").put("text", text)
+        ch.send(DataChannel.Buffer(java.nio.ByteBuffer.wrap(o.toString().toByteArray(Charsets.UTF_8)), false))
     }
 
     // Controller-requested encoder profile (bitrate) — helps on slow mobile links.

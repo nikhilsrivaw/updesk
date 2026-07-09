@@ -196,5 +196,78 @@
             android:gravity="start|center_vertical"
             android:layout_marginTop="6dp" />
 
+        <!-- Chat (visible during a session) -->
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/chatCard"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:visibility="gone"
+            app:cardBackgroundColor="#141A24"
+            app:cardCornerRadius="18dp"
+            app:cardElevation="0dp"
+            app:strokeColor="#232C3B"
+            app:strokeWidth="1dp"
+            android:layout_marginTop="20dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="14dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="CHAT"
+                    android:textColor="#6B7A8D"
+                    android:textSize="11sp"
+                    android:letterSpacing="0.15"
+                    android:layout_marginBottom="8dp" />
+
+                <ScrollView
+                    android:id="@+id/chatScroll"
+                    android:layout_width="match_parent"
+                    android:layout_height="180dp">
+
+                    <LinearLayout
+                        android:id="@+id/chatMessages"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical" />
+                </ScrollView>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:layout_marginTop="10dp">
+
+                    <EditText
+                        android:id="@+id/chatInput"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:hint="Message…"
+                        android:textColor="#F1F5F9"
+                        android:textColorHint="#6B7A8D"
+                        android:inputType="text"
+                        android:maxLines="3"
+                        android:autofillHints="" />
+
+                    <Button
+                        android:id="@+id/chatSend"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Send"
+                        android:textAllCaps="false"
+                        android:textColor="#FFFFFF"
+                        android:backgroundTint="#2563EB"
+                        app:cornerRadius="10dp"
+                        android:layout_marginStart="8dp" />
+                </LinearLayout>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
     </LinearLayout>
 </ScrollView>
