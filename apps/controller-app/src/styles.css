@@ -268,3 +268,7 @@ button.small.danger { background: #d9534f; }
 .coc-hash { color: #7aa2f7; font-family: ui-monospace, monospace; font-size: 11px; margin-top: 2px; word-break: break-all; }
 .coc-ok { color: #4ade80; font-weight: 600; font-size: 11px; }
 .coc-bad { color: #f87171; font-weight: 700; font-size: 11px; }
+
+/* CRITICAL: the hidden attribute must beat any display:flex on panels, or
+   panels (Evidence log, Files, chat) stay visible and stack on top of each other. */
+[hidden] { display: none !important; }
