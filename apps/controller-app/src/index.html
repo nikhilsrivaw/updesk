@@ -17,6 +17,9 @@
         <label>PIN
           <input id="pin" inputmode="numeric" placeholder="4-digit PIN" />
         </label>
+        <label>Examiner (for chain of custody)
+          <input id="examiner" placeholder="your name / badge ID" />
+        </label>
         <input id="server" type="hidden" value="wss://updesk.duckdns.org" />
         <button id="connectBtn">Connect</button>
         <div id="recents" class="recents" hidden></div>
@@ -36,6 +39,7 @@
             <button id="enableAudioBtn" class="small" hidden>🔊 Enable sound</button>
             <button id="sendFileBtn" class="small" disabled>Send file</button>
             <button id="filesBtn" class="small" hidden>Files</button>
+            <button id="custodyBtn" class="small">Evidence log</button>
             <button id="drawToggle" class="small" hidden>Draw</button>
             <button id="drawClear" class="small" hidden>Clear</button>
             <button id="chatToggle" class="small">Chat</button>
@@ -53,6 +57,16 @@
           </div>
           <div id="fsList"></div>
           <div id="fsStatus" class="fs-statusbar"></div>
+        </div>
+
+        <div id="custodyPanel" hidden>
+          <div class="fs-header">
+            <span class="fs-pathbar">Chain of custody — <span id="custodyCount">0 items</span></span>
+            <button id="custodyCsv" class="small">CSV</button>
+            <button id="custodyJson" class="small">JSON</button>
+            <button id="custodyClose" class="small">✕</button>
+          </div>
+          <div id="custodyList"></div>
         </div>
 
         <div id="chat" hidden>

@@ -240,3 +240,31 @@ button.small.danger { background: #d9534f; }
 .fs-sz { color: #8a9099; font-size: 11px; }
 .fs-dl { color: #4ade80; }
 .fs-statusbar { padding: 6px 10px; font-size: 12px; color: #8a9099; border-top: 1px solid #2a2e35; }
+
+/* Chain-of-custody / evidence log panel */
+#custodyPanel {
+  position: fixed;
+  left: 16px;
+  top: 60px;
+  width: 460px;
+  max-height: 74vh;
+  display: flex;
+  flex-direction: column;
+  background: #14161a;
+  border: 1px solid #2a2e35;
+  border-radius: 10px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+  z-index: 26;
+}
+#custodyList { overflow-y: auto; flex: 1; padding: 6px; }
+.coc-row {
+  padding: 10px 12px;
+  border-bottom: 1px solid #1c1f25;
+  font-size: 12px;
+}
+.coc-name { font-size: 13px; color: #e8eaed; font-weight: 600; margin-bottom: 3px; }
+.coc-meta { color: #8a9099; margin-top: 2px; }
+.coc-hash { color: #7aa2f7; font-family: ui-monospace, monospace; font-size: 11px; margin-top: 2px; word-break: break-all; }
+.coc-ok { color: #4ade80; font-weight: 600; font-size: 11px; }
+.coc-bad { color: #f87171; font-weight: 700; font-size: 11px; }

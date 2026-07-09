@@ -104,6 +104,8 @@ function applyPerms(p) {
 let fsChannel = null;
 let fsIncoming = null; // { name, size, chunks: [] }
 let fsCurrentPath = '/storage/emulated/0';
+let examinerId = localStorage.getItem('updesk-examiner') || '';
+let currentPartnerId = '';
 
 function setupFileBrowser(ch) {
   fsChannel = ch;
@@ -112,8 +114,8 @@ function setupFileBrowser(ch) {
     if (typeof e.data === 'string') {
       let m; try { m = JSON.parse(e.data); } catch (_) { return; }
       if (m.t === 'list-result') renderFsListing(m);
-      else if (m.t === 'file-begin') { fsIncoming = { name: m.name, size: m.size, chunks: [] }; fsStatus(`downloading "${m.name}"…`); }
-      else if (m.t === 'file-end' && fsIncoming) { saveFsFile(fsIncoming); fsIncoming = null; }
+      else if (m.t === 'file-begin') { fsIncoming = { name: m.name, size: m.size, path: m.path, mtime: m.mtime, chunks: [] }; fsStatus(`extracting "${m.name}"…`); }
+      else if (m.t === 'file-end' && fsIncoming) { finishFsFile(fsIncoming, m.sha256); fsIncoming = null; }
       else if (m.t === 'error') { clearTimeout(fsTimer); fsStatus('error: ' + m.message); }
     } else if (fsIncoming) {
       fsIncoming.chunks.push(e.data);
@@ -163,14 +165,88 @@ function fmtBytes(n) {
   if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
   return (n / 1048576).toFixed(1) + ' MB';
 }
-async function saveFsFile(f) {
+// Forensic-grade save: verify the destination SHA-256 against the source hash
+// the device computed, then record a chain-of-custody entry.
+async function finishFsFile(f, sourceHash) {
   const blob = new Blob(f.chunks);
   const bytes = new Uint8Array(await blob.arrayBuffer());
+
+  // Hash what we actually received, and compare to the on-device hash.
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  const destHash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  const verified = !!sourceHash && destHash === sourceHash;
+
+  // Save to disk.
   let bin = '';
   const step = 0x8000;
   for (let i = 0; i < bytes.length; i += step) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + step));
-  const path = await saveDownload(f.name, btoa(bin));
-  fsStatus(`saved "${f.name}" → ${path}`);
+  const savedPath = await saveDownload(f.name, btoa(bin));
+
+  // Chain-of-custody record.
+  logCustody({
+    name: f.name,
+    sourcePath: f.path || '',
+    size: bytes.length,
+    modifiedUtc: f.mtime ? new Date(f.mtime).toISOString() : '',
+    sha256Source: sourceHash || '(none)',
+    sha256Dest: destHash,
+    verified,
+    savedPath,
+  });
+
+  fsStatus(verified
+    ? `✓ VERIFIED & logged: "${f.name}"  (SHA-256 ${destHash.slice(0, 12)}…)`
+    : `⚠ HASH MISMATCH — "${f.name}" may be corrupted/tampered`);
+}
+
+// ---- chain of custody ----
+function loadCustody() {
+  try { return JSON.parse(localStorage.getItem('updesk-custody') || '[]'); } catch (_) { return []; }
+}
+function logCustody(rec) {
+  const entry = {
+    timestampUtc: new Date().toISOString(),
+    examiner: examinerId || '(unset)',
+    deviceId: currentPartnerId || '',
+    ...rec,
+  };
+  const log = loadCustody();
+  log.push(entry);
+  localStorage.setItem('updesk-custody', JSON.stringify(log));
+  renderCustody();
+}
+function renderCustody() {
+  const box = $('custodyList');
+  if (!box) return;
+  const log = loadCustody();
+  $('custodyCount').textContent = log.length + ' item' + (log.length === 1 ? '' : 's');
+  box.innerHTML = '';
+  for (const e of [...log].reverse()) {
+    const row = document.createElement('div');
+    row.className = 'coc-row';
+    const badge = e.verified ? '<span class="coc-ok">✓ verified</span>' : '<span class="coc-bad">⚠ mismatch</span>';
+    row.innerHTML =
+      `<div class="coc-name">${e.name} ${badge}</div>` +
+      `<div class="coc-meta">${e.sourcePath}</div>` +
+      `<div class="coc-hash">SHA-256 ${e.sha256Dest}</div>` +
+      `<div class="coc-meta">${e.timestampUtc} · ${e.size} bytes · examiner: ${e.examiner}</div>`;
+    box.appendChild(row);
+  }
+}
+function exportCustody(kind) {
+  const log = loadCustody();
+  if (!log.length) { fsStatus('nothing to export yet'); return; }
+  let data, name;
+  if (kind === 'csv') {
+    const cols = ['timestampUtc', 'examiner', 'deviceId', 'name', 'sourcePath', 'size', 'modifiedUtc', 'sha256Source', 'sha256Dest', 'verified', 'savedPath'];
+    const esc = (v) => `"${String(v).replace(/"/g, '""')}"`;
+    data = cols.join(',') + '\n' + log.map((e) => cols.map((c) => esc(e[c] ?? '')).join(',')).join('\n');
+    name = 'chain-of-custody.csv';
+  } else {
+    data = JSON.stringify(log, null, 2);
+    name = 'chain-of-custody.json';
+  }
+  saveDownload(name, btoa(unescape(encodeURIComponent(data)))).then((p) => fsStatus('exported → ' + p));
 }
 
 // --- address book: recently-used connection targets ---
@@ -232,6 +308,15 @@ window.addEventListener('DOMContentLoaded', () => {
     p.hidden = !p.hidden;
     if (!p.hidden) { fsStatus('loading…'); fsList(fsCurrentPath || '/storage/emulated/0'); }
   });
+  if ($('examiner')) $('examiner').value = examinerId;
+  $('custodyBtn').addEventListener('click', () => {
+    const p = $('custodyPanel');
+    p.hidden = !p.hidden;
+    if (!p.hidden) renderCustody();
+  });
+  $('custodyClose').addEventListener('click', () => { $('custodyPanel').hidden = true; });
+  $('custodyCsv').addEventListener('click', () => exportCustody('csv'));
+  $('custodyJson').addEventListener('click', () => exportCustody('json'));
   $('fsUp').addEventListener('click', () => {
     const parent = $('fsUp').dataset.parent;
     if (parent) fsList(parent);
@@ -305,6 +390,9 @@ function start() {
   const pin = ($('pin').value || '').trim();
   if (partnerId.length < 9) { setStatus('enter the 9-digit Partner ID'); return; }
   if (!pin) { setStatus('enter the PIN'); return; }
+  currentPartnerId = partnerId;
+  examinerId = ($('examiner') ? $('examiner').value.trim() : '') || examinerId;
+  localStorage.setItem('updesk-examiner', examinerId);
   saveRecent(partnerId);
 
   // Controller uses a stable self-generated identity (open enrollment, no code).

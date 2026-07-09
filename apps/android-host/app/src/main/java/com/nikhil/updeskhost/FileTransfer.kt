@@ -58,18 +58,28 @@ class FileTransfer(private val channel: DataChannel) {
     private fun get(path: String) {
         val f = File(path)
         if (!f.isFile || !f.canRead()) { error("can't read: $path"); return }
-        sendJson(JSONObject().put("t", "file-begin").put("name", f.name).put("size", f.length()))
+        // Forensic integrity: hash the source on the device as it streams, plus
+        // carry metadata (path, size, modified-time) for the chain of custody.
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        sendJson(
+            JSONObject().put("t", "file-begin")
+                .put("name", f.name)
+                .put("size", f.length())
+                .put("path", f.absolutePath)
+                .put("mtime", f.lastModified())
+        )
         f.inputStream().use { ins ->
             val buf = ByteArray(16 * 1024)
             while (true) {
                 val n = ins.read(buf)
                 if (n < 0) break
-                // Backpressure: don't outrun the channel's send buffer.
+                md.update(buf, 0, n)
                 while (channel.bufferedAmount() > 8L * 1024 * 1024) Thread.sleep(8)
                 sendBinary(buf.copyOf(n))
             }
         }
-        sendJson(JSONObject().put("t", "file-end"))
+        val sha256 = md.digest().joinToString("") { "%02x".format(it) }
+        sendJson(JSONObject().put("t", "file-end").put("sha256", sha256))
     }
 
     private fun error(msg: String) = sendJson(JSONObject().put("t", "error").put("message", msg))
