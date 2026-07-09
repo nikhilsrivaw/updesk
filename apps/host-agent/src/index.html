@@ -11,27 +11,24 @@
       <h1>UpDesk Host</h1>
 
       <section id="config">
-        <label>Signaling server
-          <input id="server" value="wss://localhost:8080" />
-        </label>
-        <label>Device ID
-          <input id="deviceId" value="host-1" />
-        </label>
-        <label>Enroll code <span class="hint">(first run only)</span>
-          <input id="enroll" placeholder="DEV0-TEST" />
-        </label>
+        <p class="hint">Go online, then share your ID and PIN with whoever is helping you.</p>
         <label class="check">
           <input id="autostart" type="checkbox" />
           Start UpDesk when I sign in
         </label>
         <button id="connectBtn">Go online</button>
+        <input id="server" type="hidden" value="wss://updesk.duckdns.org" />
         <button id="testOverlayBtn" class="secondary small" hidden>Test annotation overlay (auto-hides)</button>
       </section>
 
       <section id="live" hidden>
         <div id="status">connecting…</div>
-        <div id="connectHint" class="hint" hidden></div>
-        <button id="reconfigureBtn" class="secondary small">Reconfigure</button>
+        <div id="idCard" hidden>
+          <div class="id-row"><span class="id-label">Your ID</span><b id="myId">—</b></div>
+          <div class="id-row"><span class="id-label">PIN</span><b id="myPin">—</b><button id="newPinBtn" class="small secondary">New PIN</button></div>
+          <p class="hint">Give both to the person connecting. The PIN changes each time you make a new one.</p>
+        </div>
+        <button id="reconfigureBtn" class="secondary small">Go offline</button>
         <div id="banner" hidden>
           🔴 <b id="controllerName"></b> is controlling this machine
           <button id="switchBtn" class="small secondary">Switch screen</button>

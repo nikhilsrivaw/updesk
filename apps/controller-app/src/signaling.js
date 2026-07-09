@@ -188,7 +188,12 @@ export class SignalingClient extends EventTarget {
 
   register(metadata = {}) { this._send({ type: 'register', deviceId: this.identityId, metadata }); }
   respond(sessionId, accepted) { this._send({ type: 'session_response', sessionId, accepted }); }
-  connectRequest(targetDeviceId) { this._send({ type: 'connect_request', targetDeviceId }); }
+  // Dial by 9-digit partnerId + pin (AnyDesk-style), or legacy targetDeviceId.
+  connectRequest(arg) {
+    if (typeof arg === 'string') return this._send({ type: 'connect_request', targetDeviceId: arg });
+    const { partnerId, pin, targetDeviceId } = arg || {};
+    this._send({ type: 'connect_request', partnerId, pin, targetDeviceId });
+  }
   signal(type, sessionId, payload = {}) { this._send({ type, sessionId, ...payload }); }
   end(sessionId) { this._send({ type: 'end_session', sessionId }); }
 

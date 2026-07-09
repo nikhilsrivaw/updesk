@@ -10,18 +10,14 @@
     <main>
       <section id="config">
         <h1>UpDesk Controller</h1>
-        <label>Signaling server
-          <input id="server" value="wss://192.168.29.79:8080" />
+        <p class="hint">Ask the other person for their ID and PIN (shown in their UpDesk Host window).</p>
+        <label>Partner ID
+          <input id="partnerId" inputmode="numeric" placeholder="123 456 789" />
         </label>
-        <label>Controller ID
-          <input id="controllerId" value="sup-1" />
+        <label>PIN
+          <input id="pin" inputmode="numeric" placeholder="4-digit PIN" />
         </label>
-        <label>Target device ID
-          <input id="target" value="host-1" />
-        </label>
-        <label>Enroll code <span class="hint">(first run only)</span>
-          <input id="enroll" placeholder="CTL0-TEST" />
-        </label>
+        <input id="server" type="hidden" value="wss://updesk.duckdns.org" />
         <button id="connectBtn">Connect</button>
         <div id="recents" class="recents" hidden></div>
       </section>
@@ -37,6 +33,7 @@
                 <option value="saver">Data saver</option>
               </select>
             </label>
+            <button id="enableAudioBtn" class="small" hidden>🔊 Enable sound</button>
             <button id="sendFileBtn" class="small" disabled>Send file</button>
             <button id="drawToggle" class="small" hidden>Draw</button>
             <button id="drawClear" class="small" hidden>Clear</button>

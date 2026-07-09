@@ -48,6 +48,7 @@ struct AppState {
     keys: Mutex<HashMap<String, EnrolledKey>>,
     enroll_codes: Mutex<HashMap<String, EnrollCode>>,
     devices: Mutex<HashMap<String, Value>>, // deviceId -> metadata
+    device_numeric: Mutex<HashMap<String, String>>, // 9-digit connect ID -> deviceId (online only)
     sessions: Mutex<HashMap<String, Session>>,
     peers: Mutex<HashMap<String, UnboundedSender<Message>>>, // identityId -> writer
     db: Option<sqlx::PgPool>, // durable persistence + audit, when DATABASE_URL is set
@@ -329,6 +330,7 @@ where
 fn cleanup(state: &Arc<AppState>, conn: &ConnState) {
     if let Some(dev) = &conn.registered_device_id {
         state.devices.lock().unwrap().remove(dev);
+        state.device_numeric.lock().unwrap().remove(&numeric_id(dev));
         println!("Device unregistered: {dev}");
     }
     if let Some(id) = &conn.identity {
@@ -364,6 +366,24 @@ fn random_code() -> String {
     rand::thread_rng().fill_bytes(&mut b);
     let hex: String = b.iter().map(|x| format!("{x:02X}")).collect();
     format!("{}-{}", &hex[0..4], &hex[4..8])
+}
+
+// Stable 9-digit connect ID derived from a device's identity id (like an AnyDesk
+// ID). Deterministic so it survives reconnects without any persistence.
+fn numeric_id(identity_id: &str) -> String {
+    let mut h: u64 = 1469598103934665603; // FNV-1a
+    for byte in identity_id.bytes() {
+        h ^= byte as u64;
+        h = h.wrapping_mul(1099511628211);
+    }
+    let n = h % 1_000_000_000; // 0..=999,999,999
+    format!("{n:09}")
+}
+
+// Open enrollment: when OPEN_ENROLLMENT=1, new identities self-enroll with just a
+// key (no code) — the AnyDesk model, where the host's shown ID+PIN is the gate.
+fn open_enrollment() -> bool {
+    matches!(std::env::var("OPEN_ENROLLMENT").as_deref(), Ok("1") | Ok("true"))
 }
 
 fn handle_admin(state: &Arc<AppState>, tx: &UnboundedSender<Message>, mtype: &str, msg: &Value) {
@@ -514,17 +534,30 @@ fn handle_text(state: &Arc<AppState>, conn: &mut ConnState, tx: &UnboundedSender
             }
             let metadata = msg.get("metadata").cloned().unwrap_or(json!({}));
             state.devices.lock().unwrap().insert(identity.id.clone(), metadata);
+            let num = numeric_id(&identity.id);
+            state.device_numeric.lock().unwrap().insert(num.clone(), identity.id.clone());
             conn.registered_device_id = Some(identity.id.clone());
-            println!("Device registered: {}", identity.id);
-            send_json(tx, json!({ "type": "registered", "deviceId": identity.id }));
+            println!("Device registered: {} (connect ID {num})", identity.id);
+            // connectId is the 9-digit number the host shows and controllers dial.
+            send_json(tx, json!({ "type": "registered", "deviceId": identity.id, "connectId": num }));
         }
 
         "connect_request" => {
             if identity.kind != "controller" {
                 return send_json(tx, json!({ "type": "error", "message": "Only controller identities can request connections" }));
             }
-            let target = msg.get("targetDeviceId").and_then(Value::as_str).unwrap_or("");
-            let online = state.devices.lock().unwrap().contains_key(target);
+            // New (AnyDesk-style): dial by 9-digit partnerId. Legacy: targetDeviceId.
+            let partner_id = msg.get("partnerId").and_then(Value::as_str).unwrap_or("");
+            let pin = msg.get("pin").and_then(Value::as_str).unwrap_or("").to_string();
+            let target = if !partner_id.is_empty() {
+                match state.device_numeric.lock().unwrap().get(partner_id) {
+                    Some(dev) => dev.clone(),
+                    None => return send_json(tx, json!({ "type": "error", "message": "No online machine with that ID" })),
+                }
+            } else {
+                msg.get("targetDeviceId").and_then(Value::as_str).unwrap_or("").to_string()
+            };
+            let online = state.devices.lock().unwrap().contains_key(&target);
             if !online {
                 return send_json(tx, json!({ "type": "error", "message": "Device offline or not found" }));
             }
@@ -534,16 +567,18 @@ fn handle_text(state: &Arc<AppState>, conn: &mut ConnState, tx: &UnboundedSender
                 Session {
                     session_id: session_id.clone(),
                     controller_id: identity.id.clone(),
-                    device_id: target.to_string(),
+                    device_id: target.clone(),
                     status: "pending".to_string(),
                     start_time: now_ms(),
                     end_time: None,
                 },
             );
-            send_peer(state, target, json!({
+            // Forward the PIN so the host validates it (server just relays it).
+            send_peer(state, &target, json!({
                 "type": "incoming_request",
                 "sessionId": session_id,
                 "controllerId": identity.id,
+                "pin": pin,
             }));
             send_json(tx, json!({ "type": "request_sent", "sessionId": session_id }));
         }
@@ -660,6 +695,16 @@ fn start_handshake(state: &Arc<AppState>, conn: &mut ConnState, msg: &Value) -> 
             }
         }
         (pk, kind, false)
+    } else if open_enrollment() {
+        // AnyDesk model: self-enroll with just a key, no code. The host's shown
+        // ID + PIN is the access gate, not a pre-issued code. Kind comes from the
+        // client (defaults to controller).
+        let pk = public_key.ok_or("publicKey required for enrollment")?;
+        let kind = req_kind.clone().unwrap_or_else(|| "controller".to_string());
+        if kind != "device" && kind != "controller" {
+            return Err("kind must be device or controller".to_string());
+        }
+        (pk, kind, true)
     } else {
         // First contact (TOFU) — needs a public key and a valid enroll code.
         let pk = public_key.ok_or("publicKey required for enrollment")?;

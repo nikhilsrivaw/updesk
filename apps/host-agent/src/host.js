@@ -19,6 +19,19 @@ let fileChannel = null; // file-transfer channel
 let clipTimer = null; // clipboard poll interval
 let lastClip = ''; // last clipboard text seen/applied (echo guard)
 let perms = { input: true, clipboard: true, file: true }; // per-session grants
+let currentPin = ''; // PIN a controller must supply to connect
+
+// A stable per-install device identity (auto-generated once, kept in localStorage).
+// The human-facing 9-digit "Your ID" comes from the server, derived from this.
+function deviceIdentity() {
+  let id = localStorage.getItem('updesk-device-id');
+  if (!id) {
+    id = 'host-' + Math.random().toString(36).slice(2, 10);
+    localStorage.setItem('updesk-device-id', id);
+  }
+  return id;
+}
+const genPin = () => String(Math.floor(1000 + Math.random() * 9000)); // 4 digits
 
 // Persist received files to disk via the native command.
 const saveDownload = (name, data) => invoke('save_download', { name, data });
@@ -93,10 +106,11 @@ function sendChat() {
 }
 
 window.addEventListener('DOMContentLoaded', () => {
-  // Prefill from last run.
-  const saved = JSON.parse(localStorage.getItem('updesk-host-config') || '{}');
-  if (saved.server) $('server').value = saved.server;
-  if (saved.deviceId) $('deviceId').value = saved.deviceId;
+  // Regenerate the PIN on demand.
+  $('newPinBtn').addEventListener('click', () => {
+    currentPin = genPin();
+    $('myPin').textContent = currentPin;
+  });
 
   // Reflect the real launch-at-login state, and let the user toggle it.
   if (invoke) {
@@ -145,34 +159,38 @@ window.addEventListener('DOMContentLoaded', () => {
 
 function start() {
   const server = $('server').value.trim();
-  const deviceId = $('deviceId').value.trim();
-  const enroll = $('enroll').value.trim() || undefined;
-  localStorage.setItem('updesk-host-config', JSON.stringify({ server, deviceId }));
+  const deviceId = deviceIdentity(); // stable auto-generated identity
+  currentPin = genPin();
+  $('myPin').textContent = currentPin;
 
-  client = new SignalingClient({ url: server, identityId: deviceId, kind: 'device', enrollCode: enroll });
+  // No enroll code — the server runs open enrollment; the ID+PIN is the gate.
+  client = new SignalingClient({ url: server, identityId: deviceId, kind: 'device' });
 
-  client.addEventListener('ready', async () => {
-    setStatus('online — waiting for a controller');
+  client.addEventListener('ready', () => {
+    setStatus('online — waiting for a connection');
     client.register({ os: 'windows', app: 'updesk-host' });
-    // Show the controller exactly what to connect to on THIS network.
-    if (invoke) {
-      try {
-        const ip = await invoke('local_ip');
-        if (ip) {
-          $('connectHint').innerHTML =
-            `On the other PC's controller, connect to:<br><b>wss://${ip}:8080</b> &nbsp; (device: <b>${deviceId}</b>)`;
-          $('connectHint').hidden = false;
-        }
-      } catch (_) {}
-    }
+  });
+
+  // Server assigns the human-facing 9-digit connect ID.
+  client.addEventListener('registered', (e) => {
+    const id = e.detail.connectId || '';
+    $('myId').textContent = id.replace(/(\d{3})(\d{3})(\d{3})/, '$1 $2 $3') || '—';
+    $('idCard').hidden = false;
   });
 
   client.addEventListener('incoming_request', (e) => {
+    // PIN gate: reject silently (well, with a message) if it doesn't match.
+    if ((e.detail.pin || '') !== currentPin) {
+      client.respond(e.detail.sessionId, false);
+      setStatus('a connection was rejected (wrong PIN)');
+      log(`rejected ${e.detail.controllerId}: wrong PIN`);
+      return;
+    }
     pending = e.detail;
-    $('requester').textContent = pending.controllerId;
+    $('requester').textContent = 'Someone with your PIN';
     $('request').hidden = false;
-    setStatus('connection request received');
-    log(`request from ${pending.controllerId}`);
+    setStatus('connection request — PIN correct');
+    log(`request from ${pending.controllerId} (PIN ok)`);
   });
 
   client.addEventListener('answer', async (e) => {
@@ -216,12 +234,10 @@ function start() {
   client.connect();
 }
 
-function reconfigure() {
+function reconfigure() { // "Go offline"
   if (client) client.close();
   client = null;
-  localStorage.removeItem('updesk-host-config');
-  $('server').value = 'wss://localhost:8080';
-  $('enroll').value = '';
+  $('idCard').hidden = true;
   $('live').hidden = true;
   $('config').hidden = false;
   $('log').innerHTML = '';
@@ -246,13 +262,25 @@ async function acceptAndShare() {
   $('chat').hidden = false;
   setStatus(`sharing screen with ${controllerId}`);
 
-  // audio: true asks Windows to include "share system audio" — if the user
-  // ticks it in the picker, an audio track rides along and plays on the
-  // controller's <video>.
+  // Request system audio. `systemAudio:'include'` + audio constraints make some
+  // Chromium/WebView2 builds actually surface the "Share system audio" toggle.
   stream = await navigator.mediaDevices.getDisplayMedia({
     video: { frameRate: 30 },
-    audio: true
+    audio: {
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false
+    },
+    systemAudio: 'include'
   });
+
+  // Diagnostic: report exactly what the picker gave us.
+  const nAudio = stream.getAudioTracks().length;
+  const nVideo = stream.getVideoTracks().length;
+  log(`captured ${nVideo} video + ${nAudio} audio track(s)`);
+  if (nAudio === 0) {
+    log('⚠ NO audio captured — share "Entire Screen" and tick "Share system audio"');
+  }
 
   pc = new RTCPeerConnection(ICE);
   stream.getTracks().forEach((t) => pc.addTrack(t, stream));

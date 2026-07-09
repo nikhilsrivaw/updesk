@@ -135,3 +135,26 @@ button.small { padding: 4px 10px; font-size: 12px; }
 }
 .perms-title { font-size: 12px; color: #8a9099; margin-bottom: 2px; }
 .perms .check { margin: 0; font-size: 13px; }
+
+/* ID + PIN card (AnyDesk-style) */
+#idCard {
+  margin: 14px 0;
+  padding: 14px 16px;
+  background: #0f1114;
+  border: 1px solid #2a2e35;
+  border-radius: 10px;
+}
+.id-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.id-label { width: 60px; color: #8a9099; font-size: 13px; }
+.id-row b {
+  font-size: 26px;
+  letter-spacing: 2px;
+  font-variant-numeric: tabular-nums;
+  color: #e8eaed;
+}
+#myPin { color: #4ade80; }

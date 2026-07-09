@@ -5,10 +5,10 @@
 // coturn (see infra/coturn/turnserver.conf) and fill in the entries below.
 // Use turns:// (TLS) in production.
 export const ICE_SERVERS = [
-  { urls: 'stun:stun.l.google.com:19302' }
-  // {
-  //   urls: ['turn:YOUR_TURN_HOST:3478', 'turns:YOUR_TURN_HOST:5349'],
-  //   username: 'updesk',
-  //   credential: 'CHANGE_ME'
-  // }
+  { urls: 'stun:stun.l.google.com:19302' },
+  {
+    urls: ['turn:updesk.duckdns.org:3478?transport=udp', 'turn:updesk.duckdns.org:3478?transport=tcp'],
+    username: 'updesk',
+    credential: 'updesk_turn_9fKq2mXz7L'
+  }
 ];

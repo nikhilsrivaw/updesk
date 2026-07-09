@@ -105,10 +105,10 @@ function loadRecents() {
   try { return JSON.parse(localStorage.getItem('updesk-ctl-recents') || '[]'); }
   catch (_) { return []; }
 }
-function saveRecent(entry) {
-  const key = (e) => `${e.server}|${e.controllerId}|${e.target}`;
-  const recents = loadRecents().filter((e) => key(e) !== key(entry));
-  recents.unshift(entry);
+function saveRecent(partnerId) {
+  if (!partnerId) return;
+  const recents = loadRecents().filter((p) => p !== partnerId);
+  recents.unshift(partnerId);
   localStorage.setItem('updesk-ctl-recents', JSON.stringify(recents.slice(0, 6)));
 }
 function renderRecents() {
@@ -118,25 +118,17 @@ function renderRecents() {
   box.innerHTML = '';
   if (!recents.length) { box.hidden = true; return; }
   box.hidden = false;
-  for (const e of recents) {
+  for (const p of recents) {
     const chip = document.createElement('button');
     chip.type = 'button';
     chip.className = 'recent-chip';
-    chip.innerHTML = `<b>${e.target}</b><span>${e.server.replace(/^wss?:\/\//, '')}</span>`;
-    chip.addEventListener('click', () => {
-      $('server').value = e.server;
-      $('controllerId').value = e.controllerId;
-      $('target').value = e.target;
-    });
+    chip.innerHTML = `<b>${String(p).replace(/(\d{3})(\d{3})(\d{3})/, '$1 $2 $3')}</b><span>recent</span>`;
+    chip.addEventListener('click', () => { $('partnerId').value = p; $('pin').focus(); });
     box.appendChild(chip);
   }
 }
 
 window.addEventListener('DOMContentLoaded', () => {
-  const saved = JSON.parse(localStorage.getItem('updesk-ctl-config') || '{}');
-  if (saved.server) $('server').value = saved.server;
-  if (saved.controllerId) $('controllerId').value = saved.controllerId;
-  if (saved.target) $('target').value = saved.target;
   renderRecents();
   $('connectBtn').addEventListener('click', start);
   $('chatSend').addEventListener('click', sendChat);
@@ -203,6 +195,20 @@ window.addEventListener('DOMContentLoaded', () => {
   };
   window.addEventListener('keydown', (e) => sendKey('keydown', e));
   window.addEventListener('keyup', (e) => sendKey('keyup', e));
+
+  // "Enable sound" — a real click satisfies the browser's autoplay policy.
+  $('enableAudioBtn').addEventListener('click', () => {
+    const v = $('screen');
+    v.muted = false;
+    v.play().catch(() => {});
+    $('enableAudioBtn').hidden = true;
+  });
+  // Any click on the video also unmutes (belt-and-suspenders).
+  $('screen').addEventListener('click', () => {
+    const v = $('screen');
+    if (v.muted || v.paused) { v.muted = false; v.play().catch(() => {}); }
+    $('enableAudioBtn').hidden = true;
+  });
 });
 
 function endSession() {
@@ -212,22 +218,26 @@ function endSession() {
 
 function start() {
   const server = $('server').value.trim();
-  const controllerId = $('controllerId').value.trim();
-  const target = $('target').value.trim();
-  const enroll = $('enroll').value.trim() || undefined;
-  localStorage.setItem('updesk-ctl-config', JSON.stringify({ server, controllerId, target }));
-  saveRecent({ server, controllerId, target });
+  const partnerId = ($('partnerId').value || '').replace(/\D/g, ''); // digits only
+  const pin = ($('pin').value || '').trim();
+  if (partnerId.length < 9) { setStatus('enter the 9-digit Partner ID'); return; }
+  if (!pin) { setStatus('enter the PIN'); return; }
+  saveRecent(partnerId);
 
-  client = new SignalingClient({ url: server, identityId: controllerId, kind: 'controller', enrollCode: enroll });
+  // Controller uses a stable self-generated identity (open enrollment, no code).
+  let cid = localStorage.getItem('updesk-controller-id');
+  if (!cid) { cid = 'ctl-' + Math.random().toString(36).slice(2, 10); localStorage.setItem('updesk-controller-id', cid); }
+
+  client = new SignalingClient({ url: server, identityId: cid, kind: 'controller' });
 
   client.addEventListener('ready', () => {
-    setStatus(`requesting session with ${target}…`);
-    client.connectRequest(target);
+    setStatus('dialing…');
+    client.connectRequest({ partnerId, pin });
   });
 
   client.addEventListener('session_response', (e) => {
     if (!e.detail.accepted) {
-      setStatus('host REJECTED the request');
+      setStatus('rejected — wrong PIN, or the host declined');
       return;
     }
     sessionId = e.detail.sessionId;
@@ -240,12 +250,16 @@ function start() {
     sessionId = e.detail.sessionId;
     pc = new RTCPeerConnection(ICE);
 
+    const gotKinds = new Set();
     pc.ontrack = (ev) => {
       const v = $('screen');
       v.srcObject = ev.streams[0];
       v.muted = false; // let host audio through (if shared)
-      v.play().catch(() => {}); // autoplay-with-audio can need a nudge
-      setStatus('connected — live');
+      v.play().catch(() => {});
+      gotKinds.add(ev.track.kind);
+      // Visible proof of what arrived: "connected — live (video+audio)".
+      setStatus(`connected — live (${[...gotKinds].sort().join('+')})`);
+      if (ev.track.kind === 'audio') $('enableAudioBtn').hidden = false;
       log(`remote ${ev.track.kind} track received`);
     };
     // Host-created data channels: 'input' (we send input events) and 'control'
@@ -349,6 +363,7 @@ function teardown() {
   if ($('sendFileBtn')) $('sendFileBtn').disabled = true;
   if ($('chat')) $('chat').hidden = true;
   if ($('chatLog')) $('chatLog').innerHTML = '';
+  if ($('enableAudioBtn')) $('enableAudioBtn').hidden = true;
   if (pc) { pc.close(); pc = null; }
   $('screen').srcObject = null;
   setStatus('session ended');
