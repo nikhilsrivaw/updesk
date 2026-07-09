@@ -318,7 +318,11 @@ window.addEventListener('DOMContentLoaded', () => {
   $('custodyCsv').addEventListener('click', () => exportCustody('csv'));
   $('custodyJson').addEventListener('click', () => exportCustody('json'));
   $('fsUp').addEventListener('click', () => {
-    const parent = $('fsUp').dataset.parent;
+    let parent = $('fsUp').dataset.parent;
+    if (!parent && fsCurrentPath) {
+      // Fall back: strip the last path segment (handles / and \ separators).
+      parent = fsCurrentPath.replace(/[\/\\][^\/\\]*[\/\\]?$/, '') || '/';
+    }
     if (parent) fsList(parent);
   });
   $('fsClose').addEventListener('click', () => { $('fsPanel').hidden = true; });
