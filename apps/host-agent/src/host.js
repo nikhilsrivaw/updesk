@@ -329,6 +329,12 @@ async function acceptAndShare() {
   if (perms.file) attachFileReceiver(fileChannel, { log, save: saveDownload });
   $('sendFileBtn').hidden = !perms.file;
 
+  // Remote file browser (forensic extraction from this PC), if files permitted.
+  if (perms.file && invoke) {
+    const fs = pc.createDataChannel('fs');
+    attachFsHost(fs);
+  }
+
 
   pc.onicecandidate = (e) => {
     if (e.candidate) client.signal('ice_candidate', sessionId, { candidate: e.candidate });
@@ -339,6 +345,43 @@ async function acceptAndShare() {
   await pc.setLocalDescription(offer);
   client.signal('offer', sessionId, { sdp: offer.sdp });
   log('offer sent');
+}
+
+// Serve the remote file browser: handle list/get requests from the controller,
+// reading the filesystem via native commands and streaming files with a
+// source-side SHA-256 (computed in Rust) for forensic chain-of-custody.
+function attachFsHost(channel) {
+  channel.binaryType = 'arraybuffer';
+  channel.onmessage = async (e) => {
+    if (typeof e.data !== 'string') return; // host only receives JSON requests
+    let m; try { m = JSON.parse(e.data); } catch (_) { return; }
+    try {
+      if (m.t === 'list') {
+        const res = await invoke('fs_list', { path: m.path || '' });
+        channel.send(JSON.stringify({ t: 'list-result', ...res }));
+      } else if (m.t === 'get') {
+        await sendFsFile(channel, m.path);
+      }
+    } catch (err) {
+      channel.send(JSON.stringify({ t: 'error', message: String(err) }));
+    }
+  };
+}
+
+async function sendFsFile(channel, path) {
+  const meta = await invoke('fs_get_meta', { path }); // { name, size, mtime, sha256 }
+  channel.send(JSON.stringify({ t: 'file-begin', name: meta.name, size: meta.size, path, mtime: meta.mtime }));
+  const CHUNK = 16 * 1024;
+  let offset = 0;
+  while (offset < meta.size) {
+    if (channel.bufferedAmount > 8 * 1024 * 1024) { await new Promise((r) => setTimeout(r, 10)); continue; }
+    const b64 = await invoke('fs_read_chunk', { path, offset, len: CHUNK });
+    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    if (bytes.length === 0) break;
+    channel.send(bytes.buffer);
+    offset += bytes.length;
+  }
+  channel.send(JSON.stringify({ t: 'file-end', sha256: meta.sha256 }));
 }
 
 // Re-pick which screen is shared (multi-monitor) without renegotiating: swap

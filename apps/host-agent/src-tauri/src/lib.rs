@@ -9,7 +9,7 @@ use arboard::Clipboard;
 use enigo::{
     Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings,
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::sync::{Mutex, OnceLock};
 use tauri_plugin_autostart::ManagerExt;
 
@@ -162,6 +162,81 @@ fn save_download(name: String, data: String) -> Result<String, String> {
     Ok(path.display().to_string())
 }
 
+// ---- remote file browser (forensic extraction from a seized PC) ----
+
+// List a directory. Falls back to the user's home if the path is empty or
+// invalid (e.g. a controller sending an Android default path).
+#[tauri::command]
+fn fs_list(path: String) -> Result<Value, String> {
+    let mut dir = if path.is_empty() {
+        dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"))
+    } else {
+        std::path::PathBuf::from(&path)
+    };
+    if !dir.is_dir() {
+        dir = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
+    }
+    let mut entries: Vec<(String, bool, u64)> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let md = e.metadata().ok();
+            let is_dir = md.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+            let size = md.as_ref().map(|m| m.len()).unwrap_or(0);
+            entries.push((e.file_name().to_string_lossy().to_string(), is_dir, size));
+        }
+    }
+    entries.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.to_lowercase().cmp(&b.0.to_lowercase())));
+    let arr: Vec<Value> = entries
+        .into_iter()
+        .map(|(name, d, size)| json!({ "name": name, "dir": d, "size": size }))
+        .collect();
+    Ok(json!({
+        "path": dir.display().to_string(),
+        "parent": dir.parent().map(|p| p.display().to_string()).unwrap_or_default(),
+        "entries": arr
+    }))
+}
+
+// File metadata + SHA-256 of the source (single pass) — the forensic hash.
+#[tauri::command]
+fn fs_get_meta(path: String) -> Result<Value, String> {
+    use sha2::{Digest, Sha256};
+    let p = std::path::Path::new(&path);
+    let md = std::fs::metadata(p).map_err(|e| e.to_string())?;
+    if !md.is_file() {
+        return Err("not a file".into());
+    }
+    let mut file = std::fs::File::open(p).map_err(|e| e.to_string())?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher).map_err(|e| e.to_string())?;
+    let sha: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    let mtime = md
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    Ok(json!({
+        "name": p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+        "size": md.len(),
+        "mtime": mtime,
+        "sha256": sha
+    }))
+}
+
+// Read one chunk of a file as base64 (JS drives the chunking + streaming).
+#[tauri::command]
+fn fs_read_chunk(path: String, offset: u64, len: usize) -> Result<String, String> {
+    use base64::Engine;
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+    file.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
+    let mut buf = vec![0u8; len];
+    let n = file.read(&mut buf).map_err(|e| e.to_string())?;
+    buf.truncate(n);
+    Ok(base64::engine::general_purpose::STANDARD.encode(&buf))
+}
+
 // Strip any directory components / illegal chars so a hostile name can't escape
 // the target folder.
 fn sanitize(name: &str) -> String {
@@ -310,6 +385,9 @@ pub fn run() {
             set_autostart,
             get_autostart,
             local_ip,
+            fs_list,
+            fs_get_meta,
+            fs_read_chunk,
             annotate_show,
             annotate_draw,
             annotate_clear,

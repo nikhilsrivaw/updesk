@@ -27,6 +27,7 @@ enigo = "0.2"
 arboard = "3"
 base64 = "0.22"
 dirs = "5"
+sha2 = "0.10"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
