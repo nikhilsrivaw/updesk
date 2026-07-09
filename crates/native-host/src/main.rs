@@ -24,6 +24,7 @@ use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_H264};
 use webrtc::api::{APIBuilder, API};
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
+use webrtc::ice_transport::ice_credential_type::RTCIceCredentialType;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::media::Sample;
@@ -38,6 +39,7 @@ type SharedWrite = Arc<Mutex<WsWrite>>;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let url = std::env::var("UPDESK_URL").unwrap_or_else(|_| "wss://updesk.duckdns.org".into());
     let password = std::env::var("UPDESK_PW").unwrap_or_else(|_| "updesk".into());
     let identity = Identity::load();
@@ -97,8 +99,10 @@ async fn main() -> Result<()> {
                 }
                 println!("unattended connect accepted — streaming screen");
                 send(&write, json!({ "type": "session_response", "sessionId": sid, "accepted": true })).await?;
-                let new_pc = start_session(&api, &write, sid.clone()).await?;
-                pc = Some(new_pc);
+                match start_session(&api, &write, sid.clone()).await {
+                    Ok(new_pc) => pc = Some(new_pc),
+                    Err(e) => eprintln!("session setup failed (host stays online): {e}"),
+                }
             }
             "answer" => {
                 if let Some(pc) = &pc {
@@ -136,10 +140,10 @@ async fn start_session(api: &Arc<API>, write: &SharedWrite, sid: String) -> Resu
         ice_servers: vec![
             RTCIceServer { urls: vec!["stun:stun.l.google.com:19302".into()], ..Default::default() },
             RTCIceServer {
-                urls: vec!["turn:updesk.duckdns.org:3478?transport=udp".into(), "turn:updesk.duckdns.org:3478?transport=tcp".into()],
+                urls: vec!["turn:updesk.duckdns.org:3478".into()],
                 username: "updesk".into(),
                 credential: "updesk_turn_9fKq2mXz7L".into(),
-                ..Default::default()
+                credential_type: RTCIceCredentialType::Password,
             },
         ],
         ..Default::default()
@@ -153,17 +157,33 @@ async fn start_session(api: &Arc<API>, write: &SharedWrite, sid: String) -> Resu
     ));
     pc.add_track(track.clone()).await?;
 
+    // Diagnostics: watch the connection come up (or not).
+    pc.on_peer_connection_state_change(Box::new(|s| {
+        println!("[pc] {s}");
+        Box::pin(async {})
+    }));
+    pc.on_ice_connection_state_change(Box::new(|s| {
+        println!("[ice] {s}");
+        Box::pin(async {})
+    }));
+
     // capture+encode thread -> channel -> track
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
     std::thread::spawn(move || capture::run(tx));
     tokio::spawn(async move {
+        let mut n = 0u64;
         while let Some(data) = rx.recv().await {
-            let _ = track.write_sample(&Sample {
+            let bytes = data.len();
+            match track.write_sample(&Sample {
                 data: data.into(),
                 duration: std::time::Duration::from_millis(33),
                 ..Default::default()
-            }).await;
+            }).await {
+                Ok(_) => { n += 1; if n <= 3 || n % 30 == 0 { println!("[video] wrote sample {n} ({bytes} B)"); } }
+                Err(e) => { println!("[video] write_sample error: {e}"); break; }
+            }
         }
+        println!("[video] writer stopped after {n} samples");
     });
 
     // send our ICE candidates to the controller

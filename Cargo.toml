@@ -4,3 +4,9 @@ members = ["crates/signaling-server", "crates/host-service", "crates/native-host
 # Tauri apps build standalone (their own lockfile/profiles) — keep them out of
 # this workspace to avoid profile/config conflicts.
 exclude = ["apps"]
+
+# Patched webrtc-dtls: pick the first mutually-supported ECDHE curve instead of
+# the browser's first offered one (which is now a post-quantum curve webrtc-dtls
+# doesn't know) — fixes "invalid named curve" DTLS failures with modern Chrome.
+[patch.crates-io]
+webrtc-dtls = { path = "vendor/webrtc-dtls" }
