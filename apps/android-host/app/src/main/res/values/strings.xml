@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">UpDesk Host</string>
+    <string name="tagline">Go online, then share your ID and PIN with whoever is helping you.</string>
+    <string name="go_online">Go online</string>
+    <string name="your_id">Your ID</string>
+    <string name="pin">PIN</string>
+    <string name="new_pin">New PIN</string>
+    <string name="offline">offline</string>
+</resources>
