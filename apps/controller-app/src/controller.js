@@ -233,9 +233,10 @@ function renderCustody() {
     box.appendChild(row);
   }
 }
-function exportCustody(kind) {
+const custodyStatus = (s) => { if ($('custodyStatus')) $('custodyStatus').textContent = s; };
+async function exportCustody(kind) {
   const log = loadCustody();
-  if (!log.length) { fsStatus('nothing to export yet'); return; }
+  if (!log.length) { custodyStatus('No evidence yet — download a file first, then export.'); return; }
   let data, name;
   if (kind === 'csv') {
     const cols = ['timestampUtc', 'examiner', 'deviceId', 'name', 'sourcePath', 'size', 'modifiedUtc', 'sha256Source', 'sha256Dest', 'verified', 'savedPath'];
@@ -246,7 +247,14 @@ function exportCustody(kind) {
     data = JSON.stringify(log, null, 2);
     name = 'chain-of-custody.json';
   }
-  saveDownload(name, btoa(unescape(encodeURIComponent(data)))).then((p) => fsStatus('exported → ' + p));
+  custodyStatus('exporting…');
+  try {
+    const b64 = btoa(unescape(encodeURIComponent(data)));
+    const p = await saveDownload(name, b64);
+    custodyStatus('exported → ' + p);
+  } catch (e) {
+    custodyStatus('export failed: ' + e);
+  }
 }
 
 // --- address book: recently-used connection targets ---
