@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">UpDesk Controller</string>
+    <string name="tagline">Ask the other person for their ID and PIN (shown in their UpDesk Host).</string>
+    <string name="partner_id">Partner ID (9 digits)</string>
+    <string name="pin_hint">PIN</string>
+    <string name="connect">Connect</string>
+    <string name="disconnect">Disconnect</string>
+    <string name="keyboard">Keyboard</string>
+</resources>
