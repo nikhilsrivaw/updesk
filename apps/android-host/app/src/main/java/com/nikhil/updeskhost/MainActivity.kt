@@ -53,6 +53,16 @@ class MainActivity : AppCompatActivity(), SignalingClient.Listener {
 
         identity = Identity.load(this)
 
+        // Android 13+ needs runtime notification permission for the foreground
+        // service's visible "screen is being shared" notification.
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                != android.content.pm.PackageManager.PERMISSION_GRANTED
+            ) {
+                requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)
+            }
+        }
+
         findViewById<Button>(R.id.goOnlineBtn).setOnClickListener { goOnline() }
         findViewById<Button>(R.id.newPinBtn).setOnClickListener {
             currentPin = genPin(); pinView.text = currentPin
@@ -93,18 +103,31 @@ class MainActivity : AppCompatActivity(), SignalingClient.Listener {
     } }
 
     private fun beginShare(sessionId: String, projectionData: Intent) {
-        ScreenCaptureService.start(this) // must be foreground before capture starts
-        val metrics = DisplayMetrics().also { windowManager.defaultDisplay.getRealMetrics(it) }
-        rtc = WebRtcClient(
-            context = applicationContext,
-            onLocalIce = { cand -> signaling.sendIce(sessionId, cand) },
-            onOfferReady = { sdp ->
-                signaling.respond(sessionId, true)  // accept
-                signaling.sendOffer(sessionId, sdp) // then the media offer
-                ui.post { setStatus("sharing screen") }
-            },
-        ).also { it.init() }
-        rtc!!.startSession(projectionData, metrics.widthPixels, metrics.heightPixels)
+        ScreenCaptureService.start(this)
+        // The foreground service becomes active asynchronously; on Android 14 the
+        // MediaProjection can't be used until it is. Give it a beat, then capture.
+        ui.postDelayed({ startCapture(sessionId, projectionData) }, 700)
+    }
+
+    private fun startCapture(sessionId: String, projectionData: Intent) {
+        try {
+            val metrics = DisplayMetrics().also { windowManager.defaultDisplay.getRealMetrics(it) }
+            rtc = WebRtcClient(
+                context = applicationContext,
+                onLocalIce = { cand -> signaling.sendIce(sessionId, cand) },
+                onOfferReady = { sdp ->
+                    signaling.respond(sessionId, true)  // accept
+                    signaling.sendOffer(sessionId, sdp) // then the media offer
+                    ui.post { setStatus("sharing screen") }
+                },
+            ).also { it.init() }
+            rtc!!.startSession(projectionData, metrics.widthPixels, metrics.heightPixels)
+        } catch (t: Throwable) {
+            // Surface the failure instead of crashing the app.
+            ScreenCaptureService.stop(this)
+            signaling.respond(sessionId, false)
+            setStatus("share failed: ${t.message}")
+        }
     }
 
     override fun onAnswer(sessionId: String, sdp: String) { ui.post { rtc?.onRemoteAnswer(sdp) } }
