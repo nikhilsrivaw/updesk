@@ -1,98 +1,194 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:padding="24dp"
-    android:gravity="center_horizontal">
+    android:fillViewport="true"
+    android:background="#0B0E14">
 
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="@string/app_name"
-        android:textSize="22sp"
-        android:textStyle="bold"
-        android:layout_marginBottom="8dp" />
-
-    <TextView
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="@string/tagline"
-        android:textSize="13sp"
-        android:layout_marginBottom="24dp" />
+        android:orientation="vertical"
+        android:padding="20dp">
 
-    <Button
-        android:id="@+id/goOnlineBtn"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="@string/go_online" />
+        <!-- Header -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="🖥  UpDesk Host"
+            android:textColor="#F1F5F9"
+            android:textSize="24sp"
+            android:textStyle="bold"
+            android:layout_marginTop="8dp" />
 
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="@string/your_id"
-        android:textSize="13sp"
-        android:layout_marginTop="24dp" />
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/tagline"
+            android:textColor="#8A97A8"
+            android:textSize="13sp"
+            android:layout_marginTop="4dp"
+            android:layout_marginBottom="20dp" />
 
-    <TextView
-        android:id="@+id/myId"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="—"
-        android:textSize="30sp"
-        android:textStyle="bold"
-        android:letterSpacing="0.1" />
+        <!-- ID + PIN card -->
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            app:cardBackgroundColor="#141A24"
+            app:cardCornerRadius="18dp"
+            app:cardElevation="0dp"
+            app:strokeColor="#232C3B"
+            app:strokeWidth="1dp">
 
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="@string/pin"
-        android:textSize="13sp"
-        android:layout_marginTop="16dp" />
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="20dp">
 
-    <TextView
-        android:id="@+id/myPin"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="—"
-        android:textSize="30sp"
-        android:textStyle="bold"
-        android:letterSpacing="0.2" />
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="YOUR ID"
+                    android:textColor="#6B7A8D"
+                    android:textSize="11sp"
+                    android:letterSpacing="0.15" />
 
-    <Button
-        android:id="@+id/newPinBtn"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="@string/new_pin"
-        android:layout_marginTop="8dp" />
+                <TextView
+                    android:id="@+id/myId"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="—"
+                    android:textColor="#F1F5F9"
+                    android:textSize="34sp"
+                    android:textStyle="bold"
+                    android:letterSpacing="0.08"
+                    android:layout_marginTop="2dp" />
 
-    <Button
-        android:id="@+id/enableControlBtn"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="@string/enable_control"
-        android:layout_marginTop="16dp" />
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:background="#232C3B"
+                    android:layout_marginTop="16dp"
+                    android:layout_marginBottom="16dp" />
 
-    <Button
-        android:id="@+id/enableFilesBtn"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="@string/enable_files"
-        android:layout_marginTop="8dp" />
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
 
-    <Button
-        android:id="@+id/rootBtn"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="@string/use_root"
-        android:layout_marginTop="8dp" />
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
 
-    <TextView
-        android:id="@+id/status"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="@string/offline"
-        android:textSize="14sp"
-        android:layout_marginTop="32dp"
-        android:gravity="center" />
-</LinearLayout>
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="PIN"
+                            android:textColor="#6B7A8D"
+                            android:textSize="11sp"
+                            android:letterSpacing="0.15" />
+
+                        <TextView
+                            android:id="@+id/myPin"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="—"
+                            android:textColor="#4ADE80"
+                            android:textSize="34sp"
+                            android:textStyle="bold"
+                            android:letterSpacing="0.2"
+                            android:layout_marginTop="2dp" />
+                    </LinearLayout>
+
+                    <Button
+                        android:id="@+id/newPinBtn"
+                        style="@style/Widget.Material3.Button.OutlinedButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/new_pin"
+                        android:textColor="#9DB2C9" />
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Share your ID and PIN with whoever is connecting."
+                    android:textColor="#6B7A8D"
+                    android:textSize="12sp"
+                    android:layout_marginTop="14dp" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- Go online -->
+        <Button
+            android:id="@+id/goOnlineBtn"
+            android:layout_width="match_parent"
+            android:layout_height="54dp"
+            android:text="@string/go_online"
+            android:textSize="16sp"
+            android:textAllCaps="false"
+            android:textColor="#FFFFFF"
+            android:backgroundTint="#2563EB"
+            app:cornerRadius="14dp"
+            android:layout_marginTop="18dp" />
+
+        <!-- Status pill -->
+        <TextView
+            android:id="@+id/status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/offline"
+            android:textColor="#8A97A8"
+            android:textSize="13sp"
+            android:gravity="center"
+            android:padding="10dp"
+            android:layout_marginTop="12dp" />
+
+        <!-- Device access section -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="DEVICE ACCESS"
+            android:textColor="#6B7A8D"
+            android:textSize="11sp"
+            android:letterSpacing="0.15"
+            android:layout_marginTop="20dp"
+            android:layout_marginBottom="8dp" />
+
+        <Button
+            android:id="@+id/enableControlBtn"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/enable_control"
+            android:textAllCaps="false"
+            android:gravity="start|center_vertical"
+            android:layout_marginTop="6dp" />
+
+        <Button
+            android:id="@+id/enableFilesBtn"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/enable_files"
+            android:textAllCaps="false"
+            android:gravity="start|center_vertical"
+            android:layout_marginTop="6dp" />
+
+        <Button
+            android:id="@+id/rootBtn"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/use_root"
+            android:textAllCaps="false"
+            android:gravity="start|center_vertical"
+            android:layout_marginTop="6dp" />
+
+    </LinearLayout>
+</ScrollView>
