@@ -316,6 +316,10 @@ async function acceptAndShare() {
       if (invoke) invoke('net_connections').then((res) => {
         try { controlChannel.send(JSON.stringify({ kind: 'netstat-result', ...res })); } catch (_) {}
       }).catch(() => {});
+    } else if (m.kind === 'vpn') {
+      if (invoke) invoke('vpn_status').then((res) => {
+        try { controlChannel.send(JSON.stringify({ kind: 'vpn-result', ...res })); } catch (_) {}
+      }).catch(() => {});
     } else if (m.kind === 'annotate') {
       // Controller is drawing on our screen. Lazily create the overlay on the
       // first draw so a normal session never spawns it.

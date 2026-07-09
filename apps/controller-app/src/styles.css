@@ -307,3 +307,20 @@ button.small.danger { background: #d9534f; }
 .net-row { padding: 8px 12px; border-bottom: 1px solid #1c1f25; font-size: 12px; }
 .net-remote { color: #e8eaed; font-weight: 600; font-family: ui-monospace, monospace; }
 .net-meta { color: #8a9099; margin-top: 2px; }
+
+/* VPN status banner + network info in the Network panel */
+.net-vpn {
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  border-bottom: 1px solid #1c1f25;
+}
+.net-vpn.on { background: #3b1418; color: #f87171; }
+.net-vpn.off { background: #12271a; color: #4ade80; }
+.net-info {
+  padding: 7px 12px;
+  font-size: 12px;
+  color: #9db2c9;
+  border-bottom: 1px solid #1c1f25;
+  font-family: ui-monospace, monospace;
+}

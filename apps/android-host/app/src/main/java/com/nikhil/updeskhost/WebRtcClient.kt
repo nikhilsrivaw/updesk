@@ -149,6 +149,8 @@ class WebRtcClient(
                 when (m.optString("kind")) {
                     "quality" -> applyQuality(m.optString("profile"))
                     "chat" -> onChat(m.optString("text"))
+                    "vpn" -> sendControl(NetworkInfo.vpn(context).put("kind", "vpn-result"))
+                    "netinfo" -> sendControl(NetworkInfo.info(context).put("kind", "netinfo-result"))
                 }
             }
             override fun onBufferedAmountChange(previousAmount: Long) {}
@@ -183,9 +185,13 @@ class WebRtcClient(
 
     /** Send a chat message to the controller over the control channel. */
     fun sendChat(text: String) {
+        sendControl(JSONObject().put("kind", "chat").put("text", text))
+    }
+
+    /** Send any control-channel JSON message to the controller. */
+    private fun sendControl(o: JSONObject) {
         val ch = controlChannel ?: return
         if (ch.state() != DataChannel.State.OPEN) return
-        val o = JSONObject().put("kind", "chat").put("text", text)
         ch.send(DataChannel.Buffer(java.nio.ByteBuffer.wrap(o.toString().toByteArray(Charsets.UTF_8)), false))
     }
 

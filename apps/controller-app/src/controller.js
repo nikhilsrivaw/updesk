@@ -236,10 +236,42 @@ function renderCustody() {
 // ---- network connection monitor ----
 let netTimer = null;
 let lastNetstat = [];
-function requestNetstat() {
+let lastVpn = null;
+let lastNetinfo = null;
+function requestNet() {
   if (controlChannel && controlChannel.readyState === 'open') {
     controlChannel.send(JSON.stringify({ kind: 'netstat' }));
+    controlChannel.send(JSON.stringify({ kind: 'vpn' }));
+    controlChannel.send(JSON.stringify({ kind: 'netinfo' }));
   }
+}
+function requestNetstat() { requestNet(); } // back-compat name
+
+function renderVpn(d) {
+  lastVpn = d;
+  const el = $('netVpn');
+  if (!el) return;
+  el.hidden = false;
+  if (d.active) {
+    const detail = [...(d.processes || []), ...(d.adapters || [])].join(', ');
+    el.className = 'net-vpn on';
+    el.textContent = '🔒 VPN DETECTED' + (detail ? ' — ' + detail : '') + (d.server ? ' (server ' + d.server + ')' : '');
+  } else {
+    el.className = 'net-vpn off';
+    el.textContent = '✓ No VPN detected';
+  }
+}
+
+function renderNetinfo(d) {
+  lastNetinfo = d;
+  const el = $('netInfo');
+  if (!el) return;
+  const parts = [];
+  if (d.type) parts.push('Network: ' + d.type);
+  if (d.ssid) parts.push('WiFi: ' + d.ssid);
+  if (d.ip) parts.push('IP: ' + d.ip);
+  el.hidden = parts.length === 0;
+  el.textContent = parts.join('  ·  ');
 }
 function renderNetstat(conns) {
   const box = $('netList');
@@ -264,7 +296,9 @@ async function exportNetstat() {
   const ts = new Date().toISOString();
   const cols = ['proto', 'local', 'remote', 'state', 'pid', 'process'];
   const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-  const header = `# UpDesk network capture\n# captured: ${ts}\n# examiner: ${examinerId || '(unset)'}\n# device: ${currentPartnerId || ''}\n`;
+  const vpnLine = lastVpn ? (lastVpn.active ? 'DETECTED (' + [...(lastVpn.processes || []), ...(lastVpn.adapters || [])].join('; ') + ')' : 'none') : 'unknown';
+  const infoLine = lastNetinfo ? [lastNetinfo.type, lastNetinfo.ssid, lastNetinfo.ip].filter(Boolean).join(' / ') : '';
+  const header = `# UpDesk network capture\n# captured: ${ts}\n# examiner: ${examinerId || '(unset)'}\n# device: ${currentPartnerId || ''}\n# VPN: ${vpnLine}\n# network: ${infoLine}\n`;
   const rows = cols.join(',') + '\n' + lastNetstat.map((c) => cols.map((k) => esc(c[k])).join(',')).join('\n');
   const name = `network-capture-${ts.replace(/[:.]/g, '-')}.csv`;
   try {
@@ -521,6 +555,10 @@ function start() {
             applyPerms(d);
           } else if (d.kind === 'netstat-result') {
             renderNetstat(d.connections || []);
+          } else if (d.kind === 'vpn-result') {
+            renderVpn(d);
+          } else if (d.kind === 'netinfo-result') {
+            renderNetinfo(d);
           }
         };
         $('quality').disabled = false;

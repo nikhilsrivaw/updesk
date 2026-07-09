@@ -278,6 +278,53 @@ fn net_connections() -> Result<Value, String> {
     Ok(json!({ "connections": conns }))
 }
 
+// VPN detector: is this machine masking its traffic through a VPN, and with
+// what? Combines VPN virtual adapters, running VPN clients, and connections on
+// known VPN ports.
+#[tauri::command]
+fn vpn_status() -> Result<Value, String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let mut adapters: Vec<String> = Vec::new();
+    let mut processes: Vec<String> = Vec::new();
+
+    // 1. VPN virtual adapters (ipconfig /all descriptions). Skip the always-present
+    // WAN Miniports to avoid false positives.
+    if let Ok(out) = Command::new("ipconfig").arg("/all").creation_flags(CREATE_NO_WINDOW).output() {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let low = line.to_lowercase();
+            let hit = ["wireguard", "openvpn", "tap-windows", "tap-nordvpn", " vpn", "tunnel", "wintun"]
+                .iter()
+                .any(|k| low.contains(k));
+            if hit && !low.contains("wan miniport") {
+                adapters.push(line.trim().to_string());
+            }
+        }
+    }
+
+    // 2. Running VPN clients.
+    let vpn_procs = [
+        "openvpn", "wireguard", "nordvpn", "expressvpn", "protonvpn", "surfshark",
+        "mullvad", "cyberghost", "tunnelbear", "windscribe", "pia", "hide.me", "wg",
+    ];
+    if let Ok(out) = Command::new("tasklist").args(["/fo", "csv", "/nh"]).creation_flags(CREATE_NO_WINDOW).output() {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let name = line.split("\",\"").next().unwrap_or("").trim_matches('"').to_string();
+            let low = name.to_lowercase();
+            if vpn_procs.iter().any(|p| low.contains(p)) {
+                processes.push(name);
+            }
+        }
+    }
+    processes.sort();
+    processes.dedup();
+
+    let active = !adapters.is_empty() || !processes.is_empty();
+    Ok(json!({ "active": active, "adapters": adapters, "processes": processes }))
+}
+
 // Read one chunk of a file as base64 (JS drives the chunking + streaming).
 #[tauri::command]
 fn fs_read_chunk(path: String, offset: u64, len: usize) -> Result<String, String> {
@@ -443,6 +490,7 @@ pub fn run() {
             fs_get_meta,
             fs_read_chunk,
             net_connections,
+            vpn_status,
             annotate_show,
             annotate_draw,
             annotate_clear,
