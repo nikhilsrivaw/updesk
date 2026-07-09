@@ -49,6 +49,18 @@ fn main() -> Result<()> {
         Some("uninstall") => return service::uninstall(),
         #[cfg(windows)]
         Some("service") => return service::run_dispatcher(),
+        // Print this machine's connect ID + password (works offline, and even
+        // while it's running as a service) so you know what to dial from the
+        // controller.
+        Some("id") => {
+            let identity = Identity::load();
+            let id = numeric_id(&identity.id);
+            let pw = std::env::var("UPDESK_PW").unwrap_or_else(|_| "updesk".into());
+            let fmt = format!("{} {} {}", &id[0..3], &id[3..6], &id[6..9]);
+            println!("Connect ID: {fmt}");
+            println!("Password:   {pw}");
+            return Ok(());
+        }
         _ => {}
     }
     tokio::runtime::Runtime::new()?.block_on(stream_main())
@@ -255,6 +267,17 @@ async fn send(write: &SharedWrite, msg: Value) -> Result<()> {
     let mut w = write.lock().await;
     w.send(Message::Text(msg.to_string())).await?;
     Ok(())
+}
+
+// The 9-digit connect ID the server assigns — same FNV-1a derivation, so we can
+// show it locally (offline / while running as a service).
+fn numeric_id(identity_id: &str) -> String {
+    let mut h: u64 = 1469598103934665603;
+    for byte in identity_id.bytes() {
+        h ^= byte as u64;
+        h = h.wrapping_mul(1099511628211);
+    }
+    format!("{:09}", h % 1_000_000_000)
 }
 
 // --- stable Ed25519 identity, persisted next to the binary ---
