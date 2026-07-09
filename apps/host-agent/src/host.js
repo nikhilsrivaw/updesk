@@ -20,6 +20,11 @@ let clipTimer = null; // clipboard poll interval
 let lastClip = ''; // last clipboard text seen/applied (echo guard)
 let perms = { input: true, clipboard: true, file: true }; // per-session grants
 let currentPin = ''; // PIN a controller must supply to connect
+// Unattended access: a permanent password + a pre-armed screen stream, so a
+// controller with the password connects with no per-session Accept prompt.
+let unattendedStream = null;
+let unattendedSession = false; // is the current session an unattended one?
+const getUnattendedPw = () => (localStorage.getItem('updesk-unattended-pw') || '');
 
 // A stable per-install device identity (auto-generated once, kept in localStorage).
 // The human-facing 9-digit "Your ID" comes from the server, derived from this.
@@ -155,7 +160,36 @@ window.addEventListener('DOMContentLoaded', () => {
   $('chatInput').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); sendChat(); }
   });
+
+  // Prefill the unattended password and wire arm/disarm.
+  $('unattendedPw').value = getUnattendedPw();
+  $('armBtn').addEventListener('click', armUnattended);
 });
+
+async function armUnattended() {
+  if (unattendedStream) { // already armed -> disarm
+    if (unattendedStream !== stream) { // don't kill a live session's stream
+      unattendedStream.getTracks().forEach((t) => t.stop());
+    }
+    unattendedStream = null;
+    $('armBtn').textContent = 'Enable unattended (pick screen)';
+    setStatus('online — waiting for a controller');
+    log('unattended access disabled');
+    return;
+  }
+  const pw = $('unattendedPw').value.trim();
+  if (!pw) { setStatus('set an unattended password first'); return; }
+  localStorage.setItem('updesk-unattended-pw', pw);
+  try {
+    unattendedStream = await captureScreen(); // gesture from this button click
+  } catch (_) {
+    setStatus('screen pick cancelled — unattended not armed');
+    return;
+  }
+  $('armBtn').textContent = 'Disable unattended';
+  setStatus('online — unattended armed (controllers can connect silently)');
+  log('unattended access armed');
+}
 
 function start() {
   const server = $('server').value.trim();
@@ -179,8 +213,18 @@ function start() {
   });
 
   client.addEventListener('incoming_request', (e) => {
-    // PIN gate: reject silently (well, with a message) if it doesn't match.
-    if ((e.detail.pin || '') !== currentPin) {
+    const supplied = e.detail.pin || '';
+    const unattendedPw = getUnattendedPw();
+    // Unattended: if the password matches AND the screen is armed, auto-accept
+    // silently — no Accept prompt, full permissions, reusing the armed stream.
+    if (unattendedStream && unattendedPw && supplied === unattendedPw) {
+      log(`unattended connect from ${e.detail.controllerId}`);
+      startSharing(e.detail.sessionId, e.detail.controllerId, unattendedStream,
+        { input: true, clipboard: true, file: true }, true);
+      return;
+    }
+    // Attended: PIN gate, then the normal Accept prompt.
+    if (supplied !== currentPin) {
       client.respond(e.detail.sessionId, false);
       setStatus('a connection was rejected (wrong PIN)');
       log(`rejected ${e.detail.controllerId}: wrong PIN`);
@@ -247,40 +291,48 @@ function reconfigure() { // "Go offline"
 async function acceptAndShare() {
   if (!pending) return;
   const { sessionId, controllerId } = pending;
-  // Capture the host's per-session grants; these are enforced below (the host
-  // is authoritative — a controller that ignores them is still blocked here).
-  perms = {
+  const grantedPerms = {
     input: $('permInput').checked,
     clipboard: $('permClipboard').checked,
     file: $('permFile').checked,
   };
   $('request').hidden = true;
-  client.respond(sessionId, true);
+  let captured;
+  try {
+    captured = await captureScreen();
+  } catch (err) {
+    client.respond(sessionId, false);
+    setStatus('screen share cancelled');
+    return;
+  }
+  startSharing(sessionId, controllerId, captured, grantedPerms, false);
+}
+
+// getDisplayMedia must run from a user gesture (button click / the arm button).
+function captureScreen() {
+  return navigator.mediaDevices.getDisplayMedia({
+    video: { frameRate: 30 },
+    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+    systemAudio: 'include'
+  });
+}
+
+// Set up the peer connection from an already-captured screen stream. Shared by
+// the attended path (acceptAndShare) and the unattended path (auto-accept with
+// a matching unattended password, reusing a pre-armed stream).
+function startSharing(sessionId, controllerId, capturedStream, grantedPerms, unattended) {
+  perms = grantedPerms;
+  stream = capturedStream;
+  unattendedSession = !!unattended;
   activeSession = sessionId;
+  client.respond(sessionId, true);
   $('controllerName').textContent = controllerId;
   $('banner').hidden = false;
   $('chat').hidden = false;
-  setStatus(`sharing screen with ${controllerId}`);
-
-  // Request system audio. `systemAudio:'include'` + audio constraints make some
-  // Chromium/WebView2 builds actually surface the "Share system audio" toggle.
-  stream = await navigator.mediaDevices.getDisplayMedia({
-    video: { frameRate: 30 },
-    audio: {
-      echoCancellation: false,
-      noiseSuppression: false,
-      autoGainControl: false
-    },
-    systemAudio: 'include'
-  });
-
-  // Diagnostic: report exactly what the picker gave us.
+  setStatus(unattended ? `unattended session with ${controllerId}` : `sharing screen with ${controllerId}`);
   const nAudio = stream.getAudioTracks().length;
   const nVideo = stream.getVideoTracks().length;
-  log(`captured ${nVideo} video + ${nAudio} audio track(s)`);
-  if (nAudio === 0) {
-    log('⚠ NO audio captured — share "Entire Screen" and tick "Share system audio"');
-  }
+  log(`sharing ${nVideo} video + ${nAudio} audio track(s)`);
 
   pc = new RTCPeerConnection(ICE);
   stream.getTracks().forEach((t) => pc.addTrack(t, stream));
@@ -431,7 +483,13 @@ function stopSharing() {
 function teardown() {
   stopClipboardSync();
   if (invoke) invoke('annotate_hide').catch(() => {}); // close the overlay
-  if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; } // stop the OS screen share
+  // Keep the armed unattended stream alive for the next unattended connection;
+  // only stop a normal (attended) capture.
+  if (stream && stream !== unattendedStream) {
+    stream.getTracks().forEach((t) => t.stop());
+  }
+  stream = null;
+  unattendedSession = false;
   if (pc) { pc.close(); pc = null; }
   videoSender = null;
   controlChannel = null;
@@ -442,6 +500,6 @@ function teardown() {
   $('banner').hidden = true;
   $('chat').hidden = true;
   $('chatLog').innerHTML = '';
-  setStatus('online — waiting for a controller');
+  setStatus(unattendedStream ? 'online — unattended armed' : 'online — waiting for a controller');
   log('session ended');
 }

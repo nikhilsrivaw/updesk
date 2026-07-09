@@ -29,6 +29,14 @@
           <p class="hint">Give both to the person connecting. The PIN changes each time you make a new one.</p>
         </div>
         <button id="reconfigureBtn" class="secondary small">Go offline</button>
+        <div id="unattended">
+          <div class="perms-title">Unattended access (connect without Accept)</div>
+          <label>Unattended password
+            <input id="unattendedPw" placeholder="set a password" />
+          </label>
+          <button id="armBtn" class="small">Enable unattended (pick screen)</button>
+          <p class="hint">Anyone with your ID + this password connects silently — no prompt. You pick the shared screen once here.</p>
+        </div>
         <div id="banner" hidden>
           🔴 <b id="controllerName"></b> is controlling this machine
           <button id="switchBtn" class="small secondary">Switch screen</button>
