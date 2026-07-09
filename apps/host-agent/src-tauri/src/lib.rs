@@ -229,10 +229,16 @@ fn fs_get_meta(path: String) -> Result<Value, String> {
 // process — "what is this device talking to right now".
 #[tauri::command]
 fn net_connections() -> Result<Value, String> {
+    use std::os::windows::process::CommandExt;
     use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000; // don't flash a console window
     // PID -> process name (from tasklist CSV).
     let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    if let Ok(out) = Command::new("tasklist").args(["/fo", "csv", "/nh"]).output() {
+    if let Ok(out) = Command::new("tasklist")
+        .args(["/fo", "csv", "/nh"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    {
         for line in String::from_utf8_lossy(&out.stdout).lines() {
             let cols: Vec<&str> = line.split("\",\"").map(|s| s.trim_matches('"')).collect();
             if cols.len() >= 2 {
@@ -242,6 +248,7 @@ fn net_connections() -> Result<Value, String> {
     }
     let out = Command::new("netstat")
         .args(["-ano"])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| e.to_string())?;
     let text = String::from_utf8_lossy(&out.stdout);

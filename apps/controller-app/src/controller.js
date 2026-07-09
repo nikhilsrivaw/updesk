@@ -235,6 +235,7 @@ function renderCustody() {
 }
 // ---- network connection monitor ----
 let netTimer = null;
+let lastNetstat = [];
 function requestNetstat() {
   if (controlChannel && controlChannel.readyState === 'open') {
     controlChannel.send(JSON.stringify({ kind: 'netstat' }));
@@ -243,6 +244,7 @@ function requestNetstat() {
 function renderNetstat(conns) {
   const box = $('netList');
   if (!box) return;
+  lastNetstat = conns;
   $('netCount').textContent = conns.length + ' connection' + (conns.length === 1 ? '' : 's');
   box.innerHTML = '';
   for (const c of conns) {
@@ -253,6 +255,23 @@ function renderNetstat(conns) {
       `<div class="net-meta">${c.proto} ${c.state || ''} · ${c.process || '?'} (pid ${c.pid})</div>` +
       `<div class="net-meta">local ${c.local}</div>`;
     box.appendChild(row);
+  }
+}
+
+// Export the current network snapshot as a timestamped evidence CSV.
+async function exportNetstat() {
+  if (!lastNetstat.length) { $('netCount').textContent = 'nothing to export yet'; return; }
+  const ts = new Date().toISOString();
+  const cols = ['proto', 'local', 'remote', 'state', 'pid', 'process'];
+  const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const header = `# UpDesk network capture\n# captured: ${ts}\n# examiner: ${examinerId || '(unset)'}\n# device: ${currentPartnerId || ''}\n`;
+  const rows = cols.join(',') + '\n' + lastNetstat.map((c) => cols.map((k) => esc(c[k])).join(',')).join('\n');
+  const name = `network-capture-${ts.replace(/[:.]/g, '-')}.csv`;
+  try {
+    const p = await saveDownload(name, btoa(unescape(encodeURIComponent(header + rows))));
+    $('netCount').textContent = 'exported → ' + p;
+  } catch (e) {
+    $('netCount').textContent = 'export failed: ' + e;
   }
 }
 
@@ -355,6 +374,7 @@ window.addEventListener('DOMContentLoaded', () => {
     if (!p.hidden) { $('netCount').textContent = 'loading…'; requestNetstat(); netTimer = setInterval(requestNetstat, 3000); }
   });
   $('netClose').addEventListener('click', () => { $('netPanel').hidden = true; clearInterval(netTimer); });
+  $('netExport').addEventListener('click', exportNetstat);
   $('custodyClose').addEventListener('click', () => { $('custodyPanel').hidden = true; });
   $('custodyCsv').addEventListener('click', () => exportCustody('csv'));
   $('custodyJson').addEventListener('click', () => exportCustody('json'));
