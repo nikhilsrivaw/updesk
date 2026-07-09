@@ -311,6 +311,11 @@ async function acceptAndShare() {
       applyQuality(m.profile);
     } else if (m.kind === 'chat') {
       appendChat('them', m.text);
+    } else if (m.kind === 'netstat') {
+      // Controller asked for our active connections — snapshot and reply.
+      if (invoke) invoke('net_connections').then((res) => {
+        try { controlChannel.send(JSON.stringify({ kind: 'netstat-result', ...res })); } catch (_) {}
+      }).catch(() => {});
     } else if (m.kind === 'annotate') {
       // Controller is drawing on our screen. Lazily create the overlay on the
       // first draw so a normal session never spawns it.

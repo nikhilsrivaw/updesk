@@ -224,6 +224,53 @@ fn fs_get_meta(path: String) -> Result<Value, String> {
     }))
 }
 
+// ---- network connection monitor (network forensics) ----
+// Snapshot of this machine's active network connections, with the owning
+// process — "what is this device talking to right now".
+#[tauri::command]
+fn net_connections() -> Result<Value, String> {
+    use std::process::Command;
+    // PID -> process name (from tasklist CSV).
+    let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if let Ok(out) = Command::new("tasklist").args(["/fo", "csv", "/nh"]).output() {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let cols: Vec<&str> = line.split("\",\"").map(|s| s.trim_matches('"')).collect();
+            if cols.len() >= 2 {
+                names.insert(cols[1].trim().to_string(), cols[0].trim().to_string());
+            }
+        }
+    }
+    let out = Command::new("netstat")
+        .args(["-ano"])
+        .output()
+        .map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut conns: Vec<Value> = Vec::new();
+    for line in text.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() < 4 || (f[0] != "TCP" && f[0] != "UDP") {
+            continue;
+        }
+        // TCP: proto local foreign state pid ; UDP: proto local foreign pid
+        let (proto, local, foreign) = (f[0], f[1], f[2]);
+        let (state, pid) = if proto == "TCP" && f.len() >= 5 {
+            (f[3], f[4])
+        } else {
+            ("", f[3])
+        };
+        // Focus on real remote conversations (skip local listeners / wildcards).
+        if foreign.starts_with("0.0.0.0") || foreign.starts_with("*") || foreign.starts_with("[::]") {
+            continue;
+        }
+        conns.push(json!({
+            "proto": proto, "local": local, "remote": foreign,
+            "state": state, "pid": pid,
+            "process": names.get(pid).cloned().unwrap_or_default()
+        }));
+    }
+    Ok(json!({ "connections": conns }))
+}
+
 // Read one chunk of a file as base64 (JS drives the chunking + streaming).
 #[tauri::command]
 fn fs_read_chunk(path: String, offset: u64, len: usize) -> Result<String, String> {
@@ -388,6 +435,7 @@ pub fn run() {
             fs_list,
             fs_get_meta,
             fs_read_chunk,
+            net_connections,
             annotate_show,
             annotate_draw,
             annotate_clear,

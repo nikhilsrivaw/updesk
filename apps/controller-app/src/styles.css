@@ -286,3 +286,24 @@ button.small.danger { background: #d9534f; }
   font-family: ui-monospace, monospace;
 }
 .fs-pathinput:focus { outline: none; border-color: #2563eb; }
+
+/* Network connection monitor panel */
+#netPanel {
+  position: fixed;
+  left: 16px;
+  top: 60px;
+  width: 440px;
+  max-height: 74vh;
+  display: flex;
+  flex-direction: column;
+  background: #14161a;
+  border: 1px solid #2a2e35;
+  border-radius: 10px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+  z-index: 26;
+}
+#netList { overflow-y: auto; flex: 1; padding: 4px; }
+.net-row { padding: 8px 12px; border-bottom: 1px solid #1c1f25; font-size: 12px; }
+.net-remote { color: #e8eaed; font-weight: 600; font-family: ui-monospace, monospace; }
+.net-meta { color: #8a9099; margin-top: 2px; }

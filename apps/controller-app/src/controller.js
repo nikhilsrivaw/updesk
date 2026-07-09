@@ -233,6 +233,29 @@ function renderCustody() {
     box.appendChild(row);
   }
 }
+// ---- network connection monitor ----
+let netTimer = null;
+function requestNetstat() {
+  if (controlChannel && controlChannel.readyState === 'open') {
+    controlChannel.send(JSON.stringify({ kind: 'netstat' }));
+  }
+}
+function renderNetstat(conns) {
+  const box = $('netList');
+  if (!box) return;
+  $('netCount').textContent = conns.length + ' connection' + (conns.length === 1 ? '' : 's');
+  box.innerHTML = '';
+  for (const c of conns) {
+    const row = document.createElement('div');
+    row.className = 'net-row';
+    row.innerHTML =
+      `<div class="net-remote">→ ${c.remote}</div>` +
+      `<div class="net-meta">${c.proto} ${c.state || ''} · ${c.process || '?'} (pid ${c.pid})</div>` +
+      `<div class="net-meta">local ${c.local}</div>`;
+    box.appendChild(row);
+  }
+}
+
 const custodyStatus = (s) => { if ($('custodyStatus')) $('custodyStatus').textContent = s; };
 async function exportCustody(kind) {
   const log = loadCustody();
@@ -319,11 +342,19 @@ window.addEventListener('DOMContentLoaded', () => {
   });
   if ($('examiner')) $('examiner').value = examinerId;
   $('custodyBtn').addEventListener('click', () => {
-    $('fsPanel').hidden = true; // don't let the two panels stack
+    $('fsPanel').hidden = true; $('netPanel').hidden = true;
     const p = $('custodyPanel');
     p.hidden = !p.hidden;
     if (!p.hidden) renderCustody();
   });
+  $('netBtn').addEventListener('click', () => {
+    $('fsPanel').hidden = true; $('custodyPanel').hidden = true;
+    const p = $('netPanel');
+    p.hidden = !p.hidden;
+    clearInterval(netTimer);
+    if (!p.hidden) { $('netCount').textContent = 'loading…'; requestNetstat(); netTimer = setInterval(requestNetstat, 3000); }
+  });
+  $('netClose').addEventListener('click', () => { $('netPanel').hidden = true; clearInterval(netTimer); });
   $('custodyClose').addEventListener('click', () => { $('custodyPanel').hidden = true; });
   $('custodyCsv').addEventListener('click', () => exportCustody('csv'));
   $('custodyJson').addEventListener('click', () => exportCustody('json'));
@@ -468,10 +499,13 @@ function start() {
             appendChat('them', d.text);
           } else if (d.kind === 'perms') {
             applyPerms(d);
+          } else if (d.kind === 'netstat-result') {
+            renderNetstat(d.connections || []);
           }
         };
         $('quality').disabled = false;
         $('chat').hidden = false;
+        $('netBtn').hidden = false;
       } else if (ch.label === 'file') {
         fileChannel = ch;
         attachFileReceiver(ch, { log, save: saveDownload });
@@ -541,6 +575,9 @@ function reconfigure() {
 
 function teardown() {
   stopClipboardSync();
+  clearInterval(netTimer);
+  if ($('netBtn')) $('netBtn').hidden = true;
+  if ($('netPanel')) $('netPanel').hidden = true;
   controlChannel = null;
   fileChannel = null;
   inputChannel = null;

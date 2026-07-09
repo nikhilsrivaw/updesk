@@ -39,6 +39,7 @@
             <button id="enableAudioBtn" class="small" hidden>🔊 Enable sound</button>
             <button id="sendFileBtn" class="small" disabled>Send file</button>
             <button id="filesBtn" class="small" hidden>Files</button>
+            <button id="netBtn" class="small" hidden>Network</button>
             <button id="custodyBtn" class="small">Evidence log</button>
             <button id="drawToggle" class="small" hidden>Draw</button>
             <button id="drawClear" class="small" hidden>Clear</button>
@@ -58,6 +59,14 @@
           </div>
           <div id="fsList"></div>
           <div id="fsStatus" class="fs-statusbar"></div>
+        </div>
+
+        <div id="netPanel" hidden>
+          <div class="fs-header">
+            <span class="fs-pathbar">Network — <span id="netCount">0 connections</span> (live)</span>
+            <button id="netClose" class="small">✕</button>
+          </div>
+          <div id="netList"></div>
         </div>
 
         <div id="custodyPanel" hidden>
