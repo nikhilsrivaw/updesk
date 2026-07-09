@@ -103,7 +103,7 @@ function applyPerms(p) {
 // --- remote file browser (fs channel; e.g. an Android host's storage) ---
 let fsChannel = null;
 let fsIncoming = null; // { name, size, chunks: [] }
-let fsCurrentPath = '/sdcard';
+let fsCurrentPath = '/storage/emulated/0';
 
 function setupFileBrowser(ch) {
   fsChannel = ch;
@@ -114,7 +114,7 @@ function setupFileBrowser(ch) {
       if (m.t === 'list-result') renderFsListing(m);
       else if (m.t === 'file-begin') { fsIncoming = { name: m.name, size: m.size, chunks: [] }; fsStatus(`downloading "${m.name}"…`); }
       else if (m.t === 'file-end' && fsIncoming) { saveFsFile(fsIncoming); fsIncoming = null; }
-      else if (m.t === 'error') fsStatus('error: ' + m.message);
+      else if (m.t === 'error') { clearTimeout(fsTimer); fsStatus('error: ' + m.message); }
     } else if (fsIncoming) {
       fsIncoming.chunks.push(e.data);
     }
@@ -122,12 +122,25 @@ function setupFileBrowser(ch) {
   $('filesBtn').hidden = false;
 }
 const fsStatus = (s) => { if ($('fsStatus')) $('fsStatus').textContent = s; };
-function fsList(path) { fsCurrentPath = path; if (fsChannel && fsChannel.readyState === 'open') fsChannel.send(JSON.stringify({ t: 'list', path })); }
+let fsTimer = null;
+function fsList(path) {
+  fsCurrentPath = path;
+  if (!fsChannel || fsChannel.readyState !== 'open') {
+    fsStatus('file channel not ready: ' + (fsChannel ? fsChannel.readyState : 'missing — reconnect'));
+    return;
+  }
+  fsChannel.send(JSON.stringify({ t: 'list', path }));
+  fsStatus('loading ' + path + ' …');
+  clearTimeout(fsTimer);
+  fsTimer = setTimeout(() => fsStatus('no reply from phone for ' + path + ' — is "File access" ON there?'), 5000);
+}
 function fsGet(path) { if (fsChannel && fsChannel.readyState === 'open') fsChannel.send(JSON.stringify({ t: 'get', path })); }
 
 function renderFsListing(m) {
+  clearTimeout(fsTimer);
   fsCurrentPath = m.path;
   $('fsPath').textContent = m.path;
+  fsStatus((m.entries || []).length + ' items');
   const box = $('fsList');
   box.innerHTML = '';
   for (const ent of m.entries || []) {
@@ -217,7 +230,7 @@ window.addEventListener('DOMContentLoaded', () => {
   $('filesBtn').addEventListener('click', () => {
     const p = $('fsPanel');
     p.hidden = !p.hidden;
-    if (!p.hidden) fsList(fsCurrentPath || '/sdcard');
+    if (!p.hidden) { fsStatus('loading…'); fsList(fsCurrentPath || '/storage/emulated/0'); }
   });
   $('fsUp').addEventListener('click', () => {
     const parent = $('fsUp').dataset.parent;

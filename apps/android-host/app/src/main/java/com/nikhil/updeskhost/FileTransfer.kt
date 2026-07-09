@@ -22,14 +22,23 @@ class FileTransfer(private val channel: DataChannel) {
 
     fun onMessage(json: JSONObject) {
         when (json.optString("t")) {
-            "list" -> Thread { runCatching { list(json.optString("path")) } }.start()
-            "get" -> Thread { runCatching { get(json.optString("path")) } }.start()
+            // Report failures instead of swallowing them (silent = looks broken).
+            "list" -> Thread {
+                try { list(json.optString("path")) } catch (e: Throwable) { error("list failed: ${e.message}") }
+            }.start()
+            "get" -> Thread {
+                try { get(json.optString("path")) } catch (e: Throwable) { error("get failed: ${e.message}") }
+            }.start()
         }
     }
 
     private fun list(path: String) {
-        val dir = File(path.ifEmpty { "/sdcard" })
-        if (!dir.isDirectory) { error("not a directory: $path"); return }
+        // Fall back to the canonical external-storage root if /sdcard is odd.
+        val start = path.ifEmpty { "/storage/emulated/0" }
+        val dir = File(start)
+        if (!dir.exists()) { error("path not found: $start (grant 'All files access'?)"); return }
+        if (!dir.isDirectory) { error("not a directory: $start"); return }
+        if (dir.listFiles() == null) { error("can't read $start — enable 'All files access' on the phone"); return }
         val arr = JSONArray()
         dir.listFiles()
             ?.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
