@@ -73,6 +73,13 @@
         android:text="@string/enable_control"
         android:layout_marginTop="16dp" />
 
+    <Button
+        android:id="@+id/enableFilesBtn"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/enable_files"
+        android:layout_marginTop="8dp" />
+
     <TextView
         android:id="@+id/status"
         android:layout_width="match_parent"

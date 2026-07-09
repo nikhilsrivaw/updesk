@@ -100,6 +100,66 @@ function applyPerms(p) {
   if (denied.length) setStatus(`connected — live (${denied.join(', ')})`);
 }
 
+// --- remote file browser (fs channel; e.g. an Android host's storage) ---
+let fsChannel = null;
+let fsIncoming = null; // { name, size, chunks: [] }
+let fsCurrentPath = '/sdcard';
+
+function setupFileBrowser(ch) {
+  fsChannel = ch;
+  ch.binaryType = 'arraybuffer';
+  ch.onmessage = (e) => {
+    if (typeof e.data === 'string') {
+      let m; try { m = JSON.parse(e.data); } catch (_) { return; }
+      if (m.t === 'list-result') renderFsListing(m);
+      else if (m.t === 'file-begin') { fsIncoming = { name: m.name, size: m.size, chunks: [] }; fsStatus(`downloading "${m.name}"…`); }
+      else if (m.t === 'file-end' && fsIncoming) { saveFsFile(fsIncoming); fsIncoming = null; }
+      else if (m.t === 'error') fsStatus('error: ' + m.message);
+    } else if (fsIncoming) {
+      fsIncoming.chunks.push(e.data);
+    }
+  };
+  $('filesBtn').hidden = false;
+}
+const fsStatus = (s) => { if ($('fsStatus')) $('fsStatus').textContent = s; };
+function fsList(path) { fsCurrentPath = path; if (fsChannel && fsChannel.readyState === 'open') fsChannel.send(JSON.stringify({ t: 'list', path })); }
+function fsGet(path) { if (fsChannel && fsChannel.readyState === 'open') fsChannel.send(JSON.stringify({ t: 'get', path })); }
+
+function renderFsListing(m) {
+  fsCurrentPath = m.path;
+  $('fsPath').textContent = m.path;
+  const box = $('fsList');
+  box.innerHTML = '';
+  for (const ent of m.entries || []) {
+    const row = document.createElement('div');
+    row.className = 'fs-row';
+    const full = (m.path.endsWith('/') ? m.path : m.path + '/') + ent.name;
+    if (ent.dir) {
+      row.innerHTML = `<span class="fs-ic">📁</span><span class="fs-name">${ent.name}</span>`;
+      row.addEventListener('click', () => fsList(full));
+    } else {
+      row.innerHTML = `<span class="fs-ic">📄</span><span class="fs-name">${ent.name}</span><span class="fs-sz">${fmtBytes(ent.size)}</span><span class="fs-dl">⬇</span>`;
+      row.addEventListener('click', () => { fsStatus(`requesting "${ent.name}"…`); fsGet(full); });
+    }
+    box.appendChild(row);
+  }
+  $('fsUp').dataset.parent = m.parent || '';
+}
+function fmtBytes(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1048576).toFixed(1) + ' MB';
+}
+async function saveFsFile(f) {
+  const blob = new Blob(f.chunks);
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let bin = '';
+  const step = 0x8000;
+  for (let i = 0; i < bytes.length; i += step) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + step));
+  const path = await saveDownload(f.name, btoa(bin));
+  fsStatus(`saved "${f.name}" → ${path}`);
+}
+
 // --- address book: recently-used connection targets ---
 function loadRecents() {
   try { return JSON.parse(localStorage.getItem('updesk-ctl-recents') || '[]'); }
@@ -154,6 +214,16 @@ window.addEventListener('DOMContentLoaded', () => {
     c.hidden = !c.hidden;
     if (!c.hidden) { c.classList.remove('minimized'); $('chatInput').focus(); }
   });
+  $('filesBtn').addEventListener('click', () => {
+    const p = $('fsPanel');
+    p.hidden = !p.hidden;
+    if (!p.hidden) fsList(fsCurrentPath || '/sdcard');
+  });
+  $('fsUp').addEventListener('click', () => {
+    const parent = $('fsUp').dataset.parent;
+    if (parent) fsList(parent);
+  });
+  $('fsClose').addEventListener('click', () => { $('fsPanel').hidden = true; });
   // Collapse the panel to just its header (and back).
   const toggleMin = () => {
     const c = $('chat');
@@ -287,6 +357,8 @@ function start() {
         fileChannel = ch;
         attachFileReceiver(ch, { log, save: saveDownload });
         $('sendFileBtn').disabled = false;
+      } else if (ch.label === 'fs') {
+        setupFileBrowser(ch);
       } else {
         inputChannel = ch;
         window.__inputChannel = ch;
@@ -364,6 +436,9 @@ function teardown() {
   if ($('chat')) $('chat').hidden = true;
   if ($('chatLog')) $('chatLog').innerHTML = '';
   if ($('enableAudioBtn')) $('enableAudioBtn').hidden = true;
+  if ($('filesBtn')) $('filesBtn').hidden = true;
+  if ($('fsPanel')) $('fsPanel').hidden = true;
+  fsChannel = null; fsIncoming = null;
   if (pc) { pc.close(); pc = null; }
   $('screen').srcObject = null;
   setStatus('session ended');

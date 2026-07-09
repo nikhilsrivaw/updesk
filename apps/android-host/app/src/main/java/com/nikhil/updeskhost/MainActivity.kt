@@ -71,7 +71,20 @@ class MainActivity : AppCompatActivity(), SignalingClient.Listener {
         findViewById<Button>(R.id.enableControlBtn).setOnClickListener {
             startActivity(Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS))
         }
+        // Grant full-storage access for the remote file browser.
+        findViewById<Button>(R.id.enableFilesBtn).setOnClickListener {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                startActivity(
+                    Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+                        .setData(android.net.Uri.parse("package:$packageName"))
+                )
+            }
+        }
     }
+
+    private fun filesGranted(): Boolean =
+        android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R ||
+            android.os.Environment.isExternalStorageManager()
 
     override fun onResume() {
         super.onResume()
@@ -79,6 +92,8 @@ class MainActivity : AppCompatActivity(), SignalingClient.Listener {
         val btn = findViewById<Button>(R.id.enableControlBtn)
         btn.text = if (InputAccessibilityService.isEnabled)
             "Remote control: ON" else getString(R.string.enable_control)
+        val fb = findViewById<Button>(R.id.enableFilesBtn)
+        fb.text = if (filesGranted()) "File access: ON" else getString(R.string.enable_files)
     }
 
     private fun goOnline() {

@@ -8,5 +8,6 @@
     <string name="new_pin">New PIN</string>
     <string name="offline">offline</string>
     <string name="enable_control">Enable remote control</string>
+    <string name="enable_files">Enable file access</string>
     <string name="accessibility_desc">Lets an authorized UpDesk controller tap, swipe, and type on this device during a session.</string>
 </resources>

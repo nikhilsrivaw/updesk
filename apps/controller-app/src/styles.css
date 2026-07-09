@@ -189,3 +189,54 @@ button.small.danger { background: #d9534f; }
 /* Draw (annotation) mode */
 #drawToggle.active { background: #ff2d55; color: #fff; border-color: #ff2d55; }
 #screen.draw-cursor { cursor: crosshair; }
+
+/* Remote file browser panel */
+#fsPanel {
+  position: fixed;
+  left: 16px;
+  top: 60px;
+  width: 380px;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  background: #14161a;
+  border: 1px solid #2a2e35;
+  border-radius: 10px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+  z-index: 25;
+}
+.fs-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: #0f1114;
+  border-bottom: 1px solid #2a2e35;
+}
+.fs-pathbar {
+  flex: 1;
+  font-size: 12px;
+  color: #c7ccd3;
+  font-family: ui-monospace, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
+#fsList { overflow-y: auto; flex: 1; }
+.fs-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  font-size: 13px;
+  cursor: pointer;
+  border-bottom: 1px solid #1c1f25;
+}
+.fs-row:hover { background: #1a1d22; }
+.fs-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fs-sz { color: #8a9099; font-size: 11px; }
+.fs-dl { color: #4ade80; }
+.fs-statusbar { padding: 6px 10px; font-size: 12px; color: #8a9099; border-top: 1px solid #2a2e35; }

@@ -35,6 +35,7 @@
             </label>
             <button id="enableAudioBtn" class="small" hidden>🔊 Enable sound</button>
             <button id="sendFileBtn" class="small" disabled>Send file</button>
+            <button id="filesBtn" class="small" hidden>Files</button>
             <button id="drawToggle" class="small" hidden>Draw</button>
             <button id="drawClear" class="small" hidden>Clear</button>
             <button id="chatToggle" class="small">Chat</button>
@@ -44,6 +45,16 @@
           <input id="fileInput" type="file" multiple hidden />
         </div>
         <video id="screen" autoplay playsinline></video>
+        <div id="fsPanel" hidden>
+          <div class="fs-header">
+            <button id="fsUp" class="small" title="Up">⬆</button>
+            <span id="fsPath" class="fs-pathbar">/sdcard</span>
+            <button id="fsClose" class="small">✕</button>
+          </div>
+          <div id="fsList"></div>
+          <div id="fsStatus" class="fs-statusbar"></div>
+        </div>
+
         <div id="chat" hidden>
           <div class="chat-header" id="chatHeader">
             <span>Chat</span>

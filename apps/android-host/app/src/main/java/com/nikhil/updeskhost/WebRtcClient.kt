@@ -40,6 +40,8 @@ class WebRtcClient(
     private var videoTrack: VideoTrack? = null
     private var helper: SurfaceTextureHelper? = null
     private var inputChannel: DataChannel? = null
+    private var fsChannel: DataChannel? = null
+    private var fileTransfer: FileTransfer? = null
 
     private val iceServers = listOf(
         PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
@@ -117,6 +119,21 @@ class WebRtcClient(
             override fun onStateChange() {}
         })
 
+        // File-system channel: remote file browser (list dirs, download files).
+        fsChannel = pc!!.createDataChannel("fs", DataChannel.Init())
+        fileTransfer = FileTransfer(fsChannel!!)
+        fsChannel!!.registerObserver(object : DataChannel.Observer {
+            override fun onMessage(buffer: DataChannel.Buffer) {
+                if (buffer.binary) return // controller only sends JSON requests
+                val bytes = ByteArray(buffer.data.remaining())
+                buffer.data.get(bytes)
+                val json = runCatching { JSONObject(String(bytes, Charsets.UTF_8)) }.getOrNull() ?: return
+                fileTransfer?.onMessage(json)
+            }
+            override fun onBufferedAmountChange(previousAmount: Long) {}
+            override fun onStateChange() {}
+        })
+
         // Create the offer.
         val constraints = MediaConstraints()
         pc!!.createOffer(object : SdpObserver {
@@ -145,6 +162,7 @@ class WebRtcClient(
 
     fun stop() {
         inputChannel?.dispose(); inputChannel = null
+        fsChannel?.dispose(); fsChannel = null; fileTransfer = null
         runCatching { capturer?.stopCapture() }
         capturer?.dispose(); capturer = null
         videoTrack?.dispose(); videoTrack = null
