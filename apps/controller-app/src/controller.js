@@ -304,12 +304,14 @@ window.addEventListener('DOMContentLoaded', () => {
     if (!c.hidden) { c.classList.remove('minimized'); $('chatInput').focus(); }
   });
   $('filesBtn').addEventListener('click', () => {
+    $('custodyPanel').hidden = true; // don't let the two panels stack
     const p = $('fsPanel');
     p.hidden = !p.hidden;
     if (!p.hidden) { fsStatus('loading…'); fsList(fsCurrentPath || '/storage/emulated/0'); }
   });
   if ($('examiner')) $('examiner').value = examinerId;
   $('custodyBtn').addEventListener('click', () => {
+    $('fsPanel').hidden = true; // don't let the two panels stack
     const p = $('custodyPanel');
     p.hidden = !p.hidden;
     if (!p.hidden) renderCustody();
