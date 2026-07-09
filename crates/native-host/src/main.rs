@@ -10,6 +10,8 @@
 
 mod capture;
 mod input;
+#[cfg(windows)]
+mod service;
 
 use anyhow::Result;
 use base64::Engine;
@@ -38,8 +40,21 @@ use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSampl
 type WsWrite = futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
 type SharedWrite = Arc<Mutex<WsWrite>>;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // Subcommands for unattended service deployment; default = stream now.
+    match std::env::args().nth(1).as_deref() {
+        #[cfg(windows)]
+        Some("install") => return service::install(),
+        #[cfg(windows)]
+        Some("uninstall") => return service::uninstall(),
+        #[cfg(windows)]
+        Some("service") => return service::run_dispatcher(),
+        _ => {}
+    }
+    tokio::runtime::Runtime::new()?.block_on(stream_main())
+}
+
+async fn stream_main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let url = std::env::var("UPDESK_URL").unwrap_or_else(|_| "wss://updesk.duckdns.org".into());
     let password = std::env::var("UPDESK_PW").unwrap_or_else(|_| "updesk".into());

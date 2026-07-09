@@ -1529,6 +1529,8 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.24.0",
  "webrtc",
+ "windows 0.58.0",
+ "windows-service",
 ]
 
 [[package]]
