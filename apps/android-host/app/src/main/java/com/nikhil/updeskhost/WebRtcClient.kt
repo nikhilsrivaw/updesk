@@ -41,7 +41,9 @@ class WebRtcClient(
     private var helper: SurfaceTextureHelper? = null
     private var inputChannel: DataChannel? = null
     private var fsChannel: DataChannel? = null
+    private var controlChannel: DataChannel? = null
     private var fileTransfer: FileTransfer? = null
+    private var videoSender: org.webrtc.RtpSender? = null
 
     private val iceServers = listOf(
         PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
@@ -103,7 +105,7 @@ class WebRtcClient(
         capturer!!.initialize(helper, context, videoSource!!.capturerObserver)
         capturer!!.startCapture(widthPx, heightPx, 30)
         videoTrack = factory.createVideoTrack("screen", videoSource).apply { setEnabled(true) }
-        pc!!.addTrack(videoTrack, listOf("updesk-stream"))
+        videoSender = pc!!.addTrack(videoTrack, listOf("updesk-stream"))
 
         // Input channel: the controller sends taps/keys here; we inject them via
         // the Accessibility service (if the user has enabled it).
@@ -129,6 +131,19 @@ class WebRtcClient(
                 buffer.data.get(bytes)
                 val json = runCatching { JSONObject(String(bytes, Charsets.UTF_8)) }.getOrNull() ?: return
                 fileTransfer?.onMessage(json)
+            }
+            override fun onBufferedAmountChange(previousAmount: Long) {}
+            override fun onStateChange() {}
+        })
+
+        // Control channel: quality requests (clipboard/chat handled elsewhere).
+        controlChannel = pc!!.createDataChannel("control", DataChannel.Init())
+        controlChannel!!.registerObserver(object : DataChannel.Observer {
+            override fun onMessage(buffer: DataChannel.Buffer) {
+                if (buffer.binary) return
+                val bytes = ByteArray(buffer.data.remaining()); buffer.data.get(bytes)
+                val m = runCatching { JSONObject(String(bytes, Charsets.UTF_8)) }.getOrNull() ?: return
+                if (m.optString("kind") == "quality") applyQuality(m.optString("profile"))
             }
             override fun onBufferedAmountChange(previousAmount: Long) {}
             override fun onStateChange() {}
@@ -160,9 +175,25 @@ class WebRtcClient(
         pc?.addIceCandidate(c)
     }
 
+    // Controller-requested encoder profile (bitrate) — helps on slow mobile links.
+    private fun applyQuality(profile: String) {
+        val sender = videoSender ?: return
+        val maxBitrate = when (profile) {
+            "saver" -> 800_000
+            "balanced" -> 2_500_000
+            else -> 8_000_000 // high
+        }
+        val params = sender.parameters
+        if (params.encodings.isNotEmpty()) {
+            params.encodings[0].maxBitrateBps = maxBitrate
+            sender.parameters = params
+        }
+    }
+
     fun stop() {
         inputChannel?.dispose(); inputChannel = null
         fsChannel?.dispose(); fsChannel = null; fileTransfer = null
+        controlChannel?.dispose(); controlChannel = null
         runCatching { capturer?.stopCapture() }
         capturer?.dispose(); capturer = null
         videoTrack?.dispose(); videoTrack = null

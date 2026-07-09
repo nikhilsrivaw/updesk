@@ -25,11 +25,14 @@ import org.json.JSONObject
  */
 class InputAccessibilityService : AccessibilityService() {
 
-    private var downX = 0f
-    private var downY = 0f
-    private var downTime = 0L
     private var screenW = 0
     private var screenH = 0
+
+    // Continuous-drag state (RustDesk-style willContinue stroke chaining).
+    private var currentStroke: GestureDescription.StrokeDescription? = null
+    private var lastX = 0f
+    private var lastY = 0f
+    private var dragging = false
 
     override fun onServiceConnected() {
         instance = this
@@ -47,44 +50,65 @@ class InputAccessibilityService : AccessibilityService() {
     /** Route one input event from the controller. */
     fun handleInput(e: JSONObject) {
         when (e.optString("kind")) {
-            "mousedown" -> {
-                downX = (e.optDouble("x").toFloat()) * screenW
-                downY = (e.optDouble("y").toFloat()) * screenH
-                downTime = System.currentTimeMillis()
-            }
-            "mouseup" -> {
-                val upX = (e.optDouble("x").toFloat()) * screenW
-                val upY = (e.optDouble("y").toFloat()) * screenH
-                val dt = (System.currentTimeMillis() - downTime).coerceIn(1, 2000)
-                val moved = kotlin.math.hypot((upX - downX).toDouble(), (upY - downY).toDouble())
-                if (moved < 16 && dt < 500) tap(downX, downY)
-                else swipe(downX, downY, upX, upY, dt)
-            }
-            "wheel" -> {
-                // Scroll = a short vertical swipe near screen centre.
-                val dy = e.optInt("dy")
-                val cx = screenW / 2f
-                val cy = screenH / 2f
-                val delta = if (dy > 0) screenH * 0.25f else -screenH * 0.25f
-                swipe(cx, cy, cx, cy + delta, 200)
-            }
+            "mousedown" -> beginDrag(px(e, "x", screenW), px(e, "y", screenH))
+            "move" -> if (dragging) continueDrag(px(e, "x", screenW), px(e, "y", screenH))
+            "mouseup" -> endDrag(px(e, "x", screenW), px(e, "y", screenH))
+            "wheel" -> wheel(e.optInt("dy"))
             "keydown" -> typeKey(e.optString("key"))
         }
     }
 
-    private fun dispatch(path: Path, durationMs: Long) {
-        val stroke = GestureDescription.StrokeDescription(path, 0, durationMs.coerceAtLeast(1))
-        dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
+    private fun px(e: JSONObject, k: String, span: Int) = (e.optDouble(k).toFloat()) * span
+
+    // --- continuous drag: down -> (moves) -> up chained into one gesture, so a
+    // slow drag scrolls/drags smoothly and a quick tiny one is just a tap. ---
+
+    private fun beginDrag(x: Float, y: Float) {
+        lastX = x; lastY = y; dragging = true
+        val path = Path().apply { moveTo(x, y); lineTo(x, y) }
+        currentStroke = GestureDescription.StrokeDescription(path, 0, SEG_MS, true)
+        dispatchStroke(currentStroke!!)
     }
 
-    private fun tap(x: Float, y: Float) {
-        val p = Path().apply { moveTo(x, y); lineTo(x + 1f, y + 1f) }
-        dispatch(p, 40)
+    private fun continueDrag(x: Float, y: Float) {
+        val prev = currentStroke ?: return
+        val path = Path().apply { moveTo(lastX, lastY); lineTo(x, y) }
+        val next = try { prev.continueStroke(path, 0, SEG_MS, true) } catch (_: Throwable) {
+            GestureDescription.StrokeDescription(path, 0, SEG_MS, true)
+        }
+        currentStroke = next
+        lastX = x; lastY = y
+        dispatchStroke(next)
     }
 
-    private fun swipe(x1: Float, y1: Float, x2: Float, y2: Float, duration: Long) {
-        val p = Path().apply { moveTo(x1, y1); lineTo(x2, y2) }
-        dispatch(p, duration)
+    private fun endDrag(x: Float, y: Float) {
+        if (!dragging) return
+        dragging = false
+        val prev = currentStroke
+        val path = Path().apply { moveTo(lastX, lastY); lineTo(x, y) }
+        val finalStroke = try {
+            prev?.continueStroke(path, 0, SEG_MS, false)
+                ?: GestureDescription.StrokeDescription(path, 0, SEG_MS, false)
+        } catch (_: Throwable) {
+            GestureDescription.StrokeDescription(path, 0, SEG_MS, false)
+        }
+        dispatchStroke(finalStroke)
+        currentStroke = null
+    }
+
+    private fun wheel(dy: Int) {
+        // Vertical scroll as a swipe near screen centre (RustDesk WHEEL_STEP/DURATION).
+        val cx = screenW / 2f
+        val cy = screenH / 2f
+        val delta = if (dy > 0) WHEEL_STEP else -WHEEL_STEP
+        val path = Path().apply { moveTo(cx, cy); lineTo(cx, cy + delta) }
+        dispatchStroke(GestureDescription.StrokeDescription(path, 0, WHEEL_MS))
+    }
+
+    private fun dispatchStroke(stroke: GestureDescription.StrokeDescription) {
+        try {
+            dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
+        } catch (_: Throwable) { /* transient dispatch races are non-fatal */ }
     }
 
     // Basic text entry into the focused editable field. Replaces the field's
@@ -108,5 +132,8 @@ class InputAccessibilityService : AccessibilityService() {
     companion object {
         @Volatile var instance: InputAccessibilityService? = null
         val isEnabled: Boolean get() = instance != null
+        private const val SEG_MS = 40L      // per drag segment
+        private const val WHEEL_STEP = 300f // scroll distance per wheel tick (px)
+        private const val WHEEL_MS = 80L
     }
 }
