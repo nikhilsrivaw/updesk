@@ -67,6 +67,18 @@ class MainActivity : AppCompatActivity(), SignalingClient.Listener {
         findViewById<Button>(R.id.newPinBtn).setOnClickListener {
             currentPin = genPin(); pinView.text = currentPin
         }
+        // Open Accessibility settings so the user can enable remote-control input.
+        findViewById<Button>(R.id.enableControlBtn).setOnClickListener {
+            startActivity(Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Reflect whether remote-control (Accessibility) is currently enabled.
+        val btn = findViewById<Button>(R.id.enableControlBtn)
+        btn.text = if (InputAccessibilityService.isEnabled)
+            "Remote control: ON" else getString(R.string.enable_control)
     }
 
     private fun goOnline() {

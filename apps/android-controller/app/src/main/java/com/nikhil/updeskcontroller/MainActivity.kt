@@ -78,9 +78,9 @@ class MainActivity : AppCompatActivity(), SignalingClient.Listener {
             applicationContext, renderer,
             onLocalIce = { c -> signaling?.sendIce(sessionId, c) },
             onAnswerReady = { answer -> signaling?.sendAnswer(sessionId, answer) },
-            onStatus = { s -> ui.post { status.text = s } },
+            onStatus = { s -> ui.post { addStatus(s) } },
         ).also { it.init(); it.onRemoteOffer(sdp) }
-        status.text = "negotiating…"
+        addStatus("negotiating…")
     } }
 
     override fun onIceCandidate(sessionId: String, candidate: JSONObject) { ui.post { rtc?.onRemoteIce(candidate) } }
@@ -142,6 +142,16 @@ class MainActivity : AppCompatActivity(), SignalingClient.Listener {
     private fun keyEvent(key: String) {
         rtc?.sendInput(JSONObject().put("kind", "keydown").put("key", key))
         rtc?.sendInput(JSONObject().put("kind", "keyup").put("key", key))
+    }
+
+    // Keep the most recent few distinct events visible (latest ICE state replaces
+    // the previous ICE line so it doesn't spam).
+    private val statusLines = LinkedHashSet<String>()
+    private fun addStatus(s: String) {
+        if (s.startsWith("ice:")) statusLines.removeAll { it.startsWith("ice:") }
+        statusLines.add(s)
+        while (statusLines.size > 5) statusLines.remove(statusLines.first())
+        status.text = statusLines.joinToString("  •  ")
     }
 
     private fun teardown() {

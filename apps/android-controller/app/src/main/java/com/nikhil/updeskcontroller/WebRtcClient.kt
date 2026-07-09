@@ -54,7 +54,14 @@ class WebRtcClient(
             .setVideoEncoderFactory(DefaultVideoEncoderFactory(eglBase.eglBaseContext, true, true))
             .setVideoDecoderFactory(DefaultVideoDecoderFactory(eglBase.eglBaseContext))
             .createPeerConnectionFactory()
-        renderer.init(eglBase.eglBaseContext, null)
+
+        // RendererEvents tell us definitively whether frames actually render.
+        renderer.init(eglBase.eglBaseContext, object : org.webrtc.RendererCommon.RendererEvents {
+            override fun onFirstFrameRendered() { onStatus("first frame rendered ✓") }
+            override fun onFrameResolutionChanged(w: Int, h: Int, rotation: Int) {
+                onStatus("frames: ${w}x${h}")
+            }
+        })
         renderer.setScalingType(org.webrtc.RendererCommon.ScalingType.SCALE_ASPECT_FIT)
         renderer.setEnableHardwareScaler(true)
     }

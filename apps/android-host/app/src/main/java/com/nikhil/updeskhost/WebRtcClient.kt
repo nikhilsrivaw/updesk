@@ -3,6 +3,7 @@ package com.nikhil.updeskhost
 import android.content.Context
 import android.content.Intent
 import org.json.JSONObject
+import org.webrtc.DataChannel
 import org.webrtc.Camera1Enumerator
 import org.webrtc.DefaultVideoDecoderFactory
 import org.webrtc.DefaultVideoEncoderFactory
@@ -38,6 +39,7 @@ class WebRtcClient(
     private var videoSource: VideoSource? = null
     private var videoTrack: VideoTrack? = null
     private var helper: SurfaceTextureHelper? = null
+    private var inputChannel: DataChannel? = null
 
     private val iceServers = listOf(
         PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
@@ -101,6 +103,20 @@ class WebRtcClient(
         videoTrack = factory.createVideoTrack("screen", videoSource).apply { setEnabled(true) }
         pc!!.addTrack(videoTrack, listOf("updesk-stream"))
 
+        // Input channel: the controller sends taps/keys here; we inject them via
+        // the Accessibility service (if the user has enabled it).
+        inputChannel = pc!!.createDataChannel("input", DataChannel.Init())
+        inputChannel!!.registerObserver(object : DataChannel.Observer {
+            override fun onMessage(buffer: DataChannel.Buffer) {
+                val bytes = ByteArray(buffer.data.remaining())
+                buffer.data.get(bytes)
+                val json = runCatching { JSONObject(String(bytes, Charsets.UTF_8)) }.getOrNull() ?: return
+                InputAccessibilityService.instance?.handleInput(json)
+            }
+            override fun onBufferedAmountChange(previousAmount: Long) {}
+            override fun onStateChange() {}
+        })
+
         // Create the offer.
         val constraints = MediaConstraints()
         pc!!.createOffer(object : SdpObserver {
@@ -128,6 +144,7 @@ class WebRtcClient(
     }
 
     fun stop() {
+        inputChannel?.dispose(); inputChannel = null
         runCatching { capturer?.stopCapture() }
         capturer?.dispose(); capturer = null
         videoTrack?.dispose(); videoTrack = null
