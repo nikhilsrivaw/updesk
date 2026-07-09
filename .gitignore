@@ -35,3 +35,4 @@ dist/
 Thumbs.db
 native-capture.png
 native-capture.h264
+native-host-identity.txt
