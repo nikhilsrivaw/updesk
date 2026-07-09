@@ -18,7 +18,7 @@ set -euo pipefail
 # ─────────────────────────── CONFIG — EDIT THESE ───────────────────────────
 DOMAIN="updesk-nikhil.duckdns.org"     # your DuckDNS domain (points at this box)
 TURN_SECRET="change-this-to-a-long-random-string"   # shared TURN password
-# The code is expected at ~/updesk (uploaded via scp of updesk-server.tar.gz).
+REPO="https://github.com/nikhilsrivaw/updesk.git"   # your GitHub repo
 # ───────────────────────────────────────────────────────────────────────────
 
 echo "==> UpDesk server setup for $DOMAIN"
