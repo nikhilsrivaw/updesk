@@ -68,17 +68,18 @@ class MainActivity : AppCompatActivity(), SignalingClient.Listener {
     }
 
     // ---- SignalingClient.Listener (all fired off the socket thread) ----
+    // Block bodies (not `= ui.post {}`) so each returns Unit, not Handler.post's Boolean.
 
-    override fun onReady() = ui.post {
+    override fun onReady() { ui.post {
         setStatus("online — waiting for a connection")
         signaling.register()
-    }
+    } }
 
-    override fun onRegistered(connectId: String) = ui.post {
+    override fun onRegistered(connectId: String) { ui.post {
         idView.text = connectId.replace(Regex("(\\d{3})(\\d{3})(\\d{3})"), "$1 $2 $3")
-    }
+    } }
 
-    override fun onIncomingRequest(sessionId: String, controllerId: String, pin: String) = ui.post {
+    override fun onIncomingRequest(sessionId: String, controllerId: String, pin: String) { ui.post {
         if (pin != currentPin) {
             signaling.respond(sessionId, false)
             setStatus("a connection was rejected (wrong PIN)")
@@ -89,7 +90,7 @@ class MainActivity : AppCompatActivity(), SignalingClient.Listener {
         setStatus("PIN correct — requesting screen permission")
         val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         projectionLauncher.launch(mpm.createScreenCaptureIntent())
-    }
+    } }
 
     private fun beginShare(sessionId: String, projectionData: Intent) {
         ScreenCaptureService.start(this) // must be foreground before capture starts
@@ -106,17 +107,17 @@ class MainActivity : AppCompatActivity(), SignalingClient.Listener {
         rtc!!.startSession(projectionData, metrics.widthPixels, metrics.heightPixels)
     }
 
-    override fun onAnswer(sessionId: String, sdp: String) = ui.post { rtc?.onRemoteAnswer(sdp) }
-    override fun onIceCandidate(sessionId: String, candidate: JSONObject) = ui.post { rtc?.onRemoteIce(candidate) }
+    override fun onAnswer(sessionId: String, sdp: String) { ui.post { rtc?.onRemoteAnswer(sdp) } }
+    override fun onIceCandidate(sessionId: String, candidate: JSONObject) { ui.post { rtc?.onRemoteIce(candidate) } }
 
-    override fun onSessionEnded(sessionId: String) = ui.post {
+    override fun onSessionEnded(sessionId: String) { ui.post {
         rtc?.stop(); rtc = null
         ScreenCaptureService.stop(this)
         pendingSessionId = null
         setStatus("session ended — online")
-    }
+    } }
 
-    override fun onError(message: String) = ui.post { setStatus("error: $message") }
+    override fun onError(message: String) { ui.post { setStatus("error: $message") } }
 
     private fun setStatus(s: String) { statusView.text = s }
     private fun genPin() = (1000 + Random.nextInt(9000)).toString()

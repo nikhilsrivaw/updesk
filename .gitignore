@@ -10,6 +10,12 @@ scripts/.keys/
 **/target/
 **/.keys/
 
+# Android build output + machine-specific config
+**/build/
+.gradle/
+**/.gradle/
+local.properties
+
 # TLS dev certs + any private keys / secrets
 certs/
 *.pem

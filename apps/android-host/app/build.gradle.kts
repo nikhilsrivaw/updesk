@@ -5,12 +5,13 @@ plugins {
 
 android {
     namespace = "com.nikhil.updeskhost"
-    compileSdk = 34
+    compileSdk = 36
+    buildToolsVersion = "36.0.0"   // matches what's installed locally
 
     defaultConfig {
         applicationId = "com.nikhil.updeskhost"
         minSdk = 26          // Android 8.0 — MediaProjection + foreground services
-        targetSdk = 34
+        targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
     }
