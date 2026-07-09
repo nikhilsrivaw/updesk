@@ -11,3 +11,4 @@ path = "src/main.rs"
 [dependencies]
 scrap = "0.5"
 image = { version = "0.25", default-features = false, features = ["png"] }
+openh264 = "0.6"

@@ -34,3 +34,4 @@ dist/
 .DS_Store
 Thumbs.db
 native-capture.png
+native-capture.h264
