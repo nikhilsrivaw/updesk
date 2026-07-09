@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/signaling-server", "crates/host-service"]
+members = ["crates/signaling-server", "crates/host-service", "crates/native-host"]
 # Tauri apps build standalone (their own lockfile/profiles) — keep them out of
 # this workspace to avoid profile/config conflicts.
 exclude = ["apps"]

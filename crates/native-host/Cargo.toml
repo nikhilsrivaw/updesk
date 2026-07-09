@@ -1,0 +1,13 @@
+[package]
+name = "native-host"
+version = "0.1.0"
+edition = "2021"
+description = "UpDesk silent native host — headless screen capture + streaming (Phase 1: capture)"
+
+[[bin]]
+name = "native-host"
+path = "src/main.rs"
+
+[dependencies]
+scrap = "0.5"
+image = { version = "0.25", default-features = false, features = ["png"] }
