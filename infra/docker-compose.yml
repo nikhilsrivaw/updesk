@@ -1,0 +1,33 @@
+# UpDesk supporting infrastructure.
+#
+#   docker compose -f infra/docker-compose.yml up -d postgres
+#
+# Postgres backs enrolled keys + the session audit log. coturn is the TURN
+# relay for NAT traversal — it needs host networking (Linux/cloud VM), so it is
+# not started by default on Windows/Mac Docker Desktop.
+
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: updesk
+      POSTGRES_PASSWORD: updesk
+      POSTGRES_DB: updesk
+    # Host port 5433 (5432 is often taken by a local Postgres install).
+    ports:
+      - "5433:5432"
+    # postgres:18+ stores data under a version subdir; mount the parent.
+    volumes:
+      - updesk-pg:/var/lib/postgresql
+
+  # Start explicitly with `--profile turn` on a Linux host:
+  #   docker compose -f infra/docker-compose.yml --profile turn up -d coturn
+  coturn:
+    image: coturn/coturn:latest
+    profiles: ["turn"]
+    network_mode: host
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+
+volumes:
+  updesk-pg:

@@ -1,0 +1,29 @@
+node_modules/
+**/node_modules/
+.env
+.env.*
+*.log
+scripts/.keys/
+
+# Rust — root AND nested (Tauri apps) build output
+/target/
+**/target/
+**/.keys/
+
+# TLS dev certs + any private keys / secrets
+certs/
+*.pem
+*.key
+*.pfx
+*.p12
+
+# Build artifacts / installers / bundles
+dist/
+*.exe
+*.msi
+*.dmg
+*.AppImage
+*.deb
+
+.DS_Store
+Thumbs.db

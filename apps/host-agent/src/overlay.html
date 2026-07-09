@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
+      #c { display: block; width: 100vw; height: 100vh; }
+    </style>
+  </head>
+  <body>
+    <canvas id="c"></canvas>
+    <script type="module">
+      const { event } = window.__TAURI__;
+      const cv = document.getElementById('c');
+      const ctx = cv.getContext('2d');
+
+      function size() {
+        cv.width = window.innerWidth;
+        cv.height = window.innerHeight;
+      }
+      size();
+      window.addEventListener('resize', size);
+
+      // Strokes arrive with normalized 0..1 coords (resolution-independent).
+      // { x0, y0, x1, y1, color } — a single line segment.
+      event.listen('draw', (e) => {
+        const s = e.payload;
+        ctx.strokeStyle = s.color || '#ff2d55';
+        ctx.lineWidth = 3;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(s.x0 * cv.width, s.y0 * cv.height);
+        ctx.lineTo(s.x1 * cv.width, s.y1 * cv.height);
+        ctx.stroke();
+      });
+
+      event.listen('clear', () => ctx.clearRect(0, 0, cv.width, cv.height));
+    </script>
+  </body>
+</html>

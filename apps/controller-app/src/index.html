@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>UpDesk Controller</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main>
+      <section id="config">
+        <h1>UpDesk Controller</h1>
+        <label>Signaling server
+          <input id="server" value="wss://192.168.29.79:8080" />
+        </label>
+        <label>Controller ID
+          <input id="controllerId" value="sup-1" />
+        </label>
+        <label>Target device ID
+          <input id="target" value="host-1" />
+        </label>
+        <label>Enroll code <span class="hint">(first run only)</span>
+          <input id="enroll" placeholder="CTL0-TEST" />
+        </label>
+        <button id="connectBtn">Connect</button>
+        <div id="recents" class="recents" hidden></div>
+      </section>
+
+      <section id="live" hidden>
+        <div id="bar">
+          <span id="status">connecting…</span>
+          <span class="bar-actions">
+            <label class="quality-label">Quality
+              <select id="quality" disabled>
+                <option value="high">High</option>
+                <option value="balanced">Balanced</option>
+                <option value="saver">Data saver</option>
+              </select>
+            </label>
+            <button id="sendFileBtn" class="small" disabled>Send file</button>
+            <button id="drawToggle" class="small" hidden>Draw</button>
+            <button id="drawClear" class="small" hidden>Clear</button>
+            <button id="chatToggle" class="small">Chat</button>
+            <button id="endBtn" class="small danger">End session</button>
+            <button id="reconfigureBtn" class="small">Reconfigure</button>
+          </span>
+          <input id="fileInput" type="file" multiple hidden />
+        </div>
+        <video id="screen" autoplay playsinline></video>
+        <div id="chat" hidden>
+          <div class="chat-header" id="chatHeader">
+            <span>Chat</span>
+            <button id="chatMin" class="chat-min" title="Minimize">–</button>
+          </div>
+          <div id="chatBody">
+            <div id="chatLog"></div>
+            <div class="chat-input">
+              <input id="chatInput" placeholder="Message the host…" />
+              <button id="chatSend" class="small">Send</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="controller.js"></script>
+  </body>
+</html>

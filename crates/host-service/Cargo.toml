@@ -1,0 +1,19 @@
+[package]
+name = "host-service"
+version = "0.1.0"
+edition = "2021"
+description = "UpDesk host Windows service — launches/keeps the host-agent in the active session (Phase 1)"
+
+[[bin]]
+name = "host-service"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Threading",
+    "Win32_System_Environment",
+    "Win32_Security",
+] }

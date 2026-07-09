@@ -1,0 +1,436 @@
+import { SignalingClient } from './signaling.js';
+import { ICE_SERVERS } from './rtcConfig.js';
+import { attachFileReceiver, sendFile } from './fileTransfer.js';
+
+// Tauri command bridge (present only inside the app; guarded for plain-browser).
+const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+const IS_TAURI = !!invoke;
+
+// Platform-adaptive OS bridges. In the desktop app these call native Tauri
+// commands; served as a plain web page they fall back to browser APIs — which is
+// what lets the controller run in ANY browser on macOS/Linux/Chromebook.
+async function saveDownload(name, dataB64) {
+  if (IS_TAURI) return invoke('save_download', { name, data: dataB64 });
+  // Browser: turn the bytes into a download.
+  const bytes = Uint8Array.from(atob(dataB64), (c) => c.charCodeAt(0));
+  const url = URL.createObjectURL(new Blob([bytes]));
+  const a = document.createElement('a');
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+  return `Downloads/${name}`;
+}
+async function osGetClipboard() {
+  if (IS_TAURI) return invoke('get_clipboard');
+  try { return await navigator.clipboard.readText(); } catch (_) { return ''; }
+}
+async function osSetClipboard(text) {
+  if (IS_TAURI) { invoke('set_clipboard', { text }); return; }
+  try { await navigator.clipboard.writeText(text); } catch (_) {}
+}
+
+const ICE = { iceServers: ICE_SERVERS };
+
+const $ = (id) => document.getElementById(id);
+let client = null;
+let pc = null;
+let sessionId = null;
+let controlChannel = null; // clipboard + quality control channel
+let fileChannel = null; // file-transfer channel
+let inputChannel = null; // controller -> host input events
+let clipTimer = null; // clipboard poll interval
+let lastClip = ''; // last clipboard text seen/applied (echo guard)
+let sessionPerms = { input: true, clipboard: true, file: true }; // host-granted
+let drawMode = false; // annotation mode: strokes go to the host overlay, not input
+
+function startClipboardSync(channel) {
+  stopClipboardSync();
+  clipTimer = setInterval(async () => {
+    if (channel.readyState !== 'open') return;
+    try {
+      const txt = await osGetClipboard();
+      if (typeof txt === 'string' && txt && txt !== lastClip) {
+        lastClip = txt;
+        channel.send(JSON.stringify({ kind: 'clipboard', text: txt }));
+      }
+    } catch (_) {}
+  }, 1200);
+}
+function stopClipboardSync() {
+  if (clipTimer) { clearInterval(clipTimer); clipTimer = null; }
+}
+
+// The on-screen log was removed from the UI; keep the calls but route them to
+// the dev console so nothing breaks.
+function log(s) {
+  console.log('[updesk]', s);
+}
+const setStatus = (s) => ($('status').textContent = s);
+
+// --- in-session text chat (rides the control channel) ---
+function appendChat(who, text) {
+  const box = $('chatLog');
+  if (!box) return;
+  const row = document.createElement('div');
+  row.className = 'chat-msg ' + (who === 'me' ? 'me' : 'them');
+  row.textContent = text;
+  box.appendChild(row);
+  box.scrollTop = box.scrollHeight;
+}
+function sendChat() {
+  const inp = $('chatInput');
+  const text = (inp.value || '').trim();
+  if (!text || !controlChannel || controlChannel.readyState !== 'open') return;
+  controlChannel.send(JSON.stringify({ kind: 'chat', text }));
+  appendChat('me', text);
+  inp.value = '';
+}
+
+// Reflect the host's per-session grants in the UI and stop sending anything
+// that isn't allowed. (The host also enforces these, so this is cosmetic +
+// polite, not the security boundary.)
+function applyPerms(p) {
+  sessionPerms = { input: !!p.input, clipboard: !!p.clipboard, file: !!p.file };
+  if (!sessionPerms.clipboard) stopClipboardSync();
+  if ($('sendFileBtn')) $('sendFileBtn').disabled = !sessionPerms.file;
+  const denied = [];
+  if (!sessionPerms.input) denied.push('view-only');
+  if (!sessionPerms.clipboard) denied.push('no clipboard');
+  if (!sessionPerms.file) denied.push('no files');
+  if (denied.length) setStatus(`connected — live (${denied.join(', ')})`);
+}
+
+// --- address book: recently-used connection targets ---
+function loadRecents() {
+  try { return JSON.parse(localStorage.getItem('updesk-ctl-recents') || '[]'); }
+  catch (_) { return []; }
+}
+function saveRecent(entry) {
+  const key = (e) => `${e.server}|${e.controllerId}|${e.target}`;
+  const recents = loadRecents().filter((e) => key(e) !== key(entry));
+  recents.unshift(entry);
+  localStorage.setItem('updesk-ctl-recents', JSON.stringify(recents.slice(0, 6)));
+}
+function renderRecents() {
+  const box = $('recents');
+  if (!box) return;
+  const recents = loadRecents();
+  box.innerHTML = '';
+  if (!recents.length) { box.hidden = true; return; }
+  box.hidden = false;
+  for (const e of recents) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'recent-chip';
+    chip.innerHTML = `<b>${e.target}</b><span>${e.server.replace(/^wss?:\/\//, '')}</span>`;
+    chip.addEventListener('click', () => {
+      $('server').value = e.server;
+      $('controllerId').value = e.controllerId;
+      $('target').value = e.target;
+    });
+    box.appendChild(chip);
+  }
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+  const saved = JSON.parse(localStorage.getItem('updesk-ctl-config') || '{}');
+  if (saved.server) $('server').value = saved.server;
+  if (saved.controllerId) $('controllerId').value = saved.controllerId;
+  if (saved.target) $('target').value = saved.target;
+  renderRecents();
+  $('connectBtn').addEventListener('click', start);
+  $('chatSend').addEventListener('click', sendChat);
+  $('chatInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); sendChat(); }
+  });
+  $('drawToggle').addEventListener('click', () => {
+    drawMode = !drawMode;
+    $('drawToggle').classList.toggle('active', drawMode);
+    $('drawClear').hidden = !drawMode;
+    $('screen').classList.toggle('draw-cursor', drawMode);
+    if (!drawMode && controlChannel && controlChannel.readyState === 'open') {
+      controlChannel.send(JSON.stringify({ kind: 'annotate', op: 'clear' }));
+    }
+  });
+  $('drawClear').addEventListener('click', () => {
+    if (controlChannel && controlChannel.readyState === 'open') {
+      controlChannel.send(JSON.stringify({ kind: 'annotate', op: 'clear' }));
+    }
+  });
+  $('chatToggle').addEventListener('click', () => {
+    const c = $('chat');
+    c.hidden = !c.hidden;
+    if (!c.hidden) { c.classList.remove('minimized'); $('chatInput').focus(); }
+  });
+  // Collapse the panel to just its header (and back).
+  const toggleMin = () => {
+    const c = $('chat');
+    const min = c.classList.toggle('minimized');
+    $('chatMin').textContent = min ? '▢' : '–';
+    $('chatMin').title = min ? 'Expand' : 'Minimize';
+  };
+  $('chatMin').addEventListener('click', (e) => { e.stopPropagation(); toggleMin(); });
+  // Clicking the header while minimized re-opens it.
+  $('chatHeader').addEventListener('click', () => {
+    if ($('chat').classList.contains('minimized')) toggleMin();
+  });
+  $('reconfigureBtn').addEventListener('click', reconfigure);
+  $('endBtn').addEventListener('click', endSession);
+  $('quality').addEventListener('change', (e) => {
+    if (controlChannel && controlChannel.readyState === 'open') {
+      controlChannel.send(JSON.stringify({ kind: 'quality', profile: e.target.value }));
+      log(`requested quality: ${e.target.value}`);
+    }
+  });
+  $('sendFileBtn').addEventListener('click', () => $('fileInput').click());
+  $('fileInput').addEventListener('change', async (e) => {
+    const files = [...e.target.files];
+    e.target.value = '';
+    for (const f of files) await sendFile(fileChannel, f, { log }); // one at a time
+  });
+
+  // Keyboard is captured at the window level (not on the <video>, which is hard
+  // to keep focused) so typing works as long as a session is live. Skip when
+  // the user is in one of our own form controls.
+  const inFormControl = (t) =>
+    t && ['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON'].includes(t.tagName);
+  const sendKey = (kind, e) => {
+    if (!sessionPerms.input) return;
+    if (!inputChannel || inputChannel.readyState !== 'open') return;
+    if (inFormControl(e.target)) return;
+    e.preventDefault();
+    inputChannel.send(JSON.stringify({ kind, key: e.key }));
+  };
+  window.addEventListener('keydown', (e) => sendKey('keydown', e));
+  window.addEventListener('keyup', (e) => sendKey('keyup', e));
+});
+
+function endSession() {
+  if (sessionId && client) client.end(sessionId);
+  teardown();
+}
+
+function start() {
+  const server = $('server').value.trim();
+  const controllerId = $('controllerId').value.trim();
+  const target = $('target').value.trim();
+  const enroll = $('enroll').value.trim() || undefined;
+  localStorage.setItem('updesk-ctl-config', JSON.stringify({ server, controllerId, target }));
+  saveRecent({ server, controllerId, target });
+
+  client = new SignalingClient({ url: server, identityId: controllerId, kind: 'controller', enrollCode: enroll });
+
+  client.addEventListener('ready', () => {
+    setStatus(`requesting session with ${target}…`);
+    client.connectRequest(target);
+  });
+
+  client.addEventListener('session_response', (e) => {
+    if (!e.detail.accepted) {
+      setStatus('host REJECTED the request');
+      return;
+    }
+    sessionId = e.detail.sessionId;
+    setStatus('accepted — negotiating media…');
+    log('session accepted');
+    // Host sends the offer next (it owns the screen track).
+  });
+
+  client.addEventListener('offer', async (e) => {
+    sessionId = e.detail.sessionId;
+    pc = new RTCPeerConnection(ICE);
+
+    pc.ontrack = (ev) => {
+      const v = $('screen');
+      v.srcObject = ev.streams[0];
+      v.muted = false; // let host audio through (if shared)
+      v.play().catch(() => {}); // autoplay-with-audio can need a nudge
+      setStatus('connected — live');
+      log(`remote ${ev.track.kind} track received`);
+    };
+    // Host-created data channels: 'input' (we send input events) and 'control'
+    // (clipboard sync + quality requests).
+    pc.ondatachannel = (ev) => {
+      const ch = ev.channel;
+      log(`data channel open: ${ch.label}`);
+      if (ch.label === 'control') {
+        controlChannel = ch;
+        ch.onopen = () => startClipboardSync(ch);
+        ch.onmessage = (m) => {
+          let d; try { d = JSON.parse(m.data); } catch (_) { return; }
+          if (d.kind === 'clipboard') {
+            lastClip = d.text;
+            osSetClipboard(d.text);
+          } else if (d.kind === 'chat') {
+            appendChat('them', d.text);
+          } else if (d.kind === 'perms') {
+            applyPerms(d);
+          }
+        };
+        $('quality').disabled = false;
+        $('chat').hidden = false;
+      } else if (ch.label === 'file') {
+        fileChannel = ch;
+        attachFileReceiver(ch, { log, save: saveDownload });
+        $('sendFileBtn').disabled = false;
+      } else {
+        inputChannel = ch;
+        window.__inputChannel = ch;
+        attachInputCapture($('screen'), ch);
+      }
+    };
+    pc.onicecandidate = (ev) => {
+      if (ev.candidate) client.signal('ice_candidate', sessionId, { candidate: ev.candidate });
+    };
+    pc.onconnectionstatechange = () => log(`pc: ${pc.connectionState}`);
+
+    await pc.setRemoteDescription({ type: 'offer', sdp: e.detail.sdp });
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    client.signal('answer', sessionId, { sdp: answer.sdp });
+    log('answer sent');
+  });
+
+  client.addEventListener('ice_candidate', async (e) => {
+    if (pc && e.detail.candidate) {
+      try { await pc.addIceCandidate(e.detail.candidate); } catch (_) {}
+    }
+  });
+
+  client.addEventListener('session_ended', teardown);
+  client.addEventListener('peer_disconnected', teardown);
+
+  client.addEventListener('reconnecting', (e) => {
+    setStatus(`connection lost — reconnecting (try ${e.detail.attempt})…`);
+  });
+  client.addEventListener('reconnected', () => {
+    setStatus('reconnected — re-requesting session…');
+    log('reconnected to server');
+  });
+  client.addEventListener('disconnected', () => setStatus('disconnected'));
+
+  client.addEventListener('error', (e) => {
+    const { kind, message } = e.detail;
+    if (kind === 'auth') setStatus(`sign-in failed: ${message}`);
+    else if (kind === 'connect') setStatus(message);
+    else setStatus(`server: ${message}`);
+    log(`${kind} error: ${message}`);
+  });
+
+  $('config').hidden = true;
+  $('live').hidden = false;
+  setStatus('connecting…');
+  client.connect();
+}
+
+function reconfigure() {
+  if (client) client.close();
+  client = null;
+  if (pc) { pc.close(); pc = null; }
+  localStorage.removeItem('updesk-ctl-config');
+  $('screen').srcObject = null;
+  $('live').hidden = true;
+  $('config').hidden = false;
+  renderRecents();
+}
+
+function teardown() {
+  stopClipboardSync();
+  controlChannel = null;
+  fileChannel = null;
+  inputChannel = null;
+  lastClip = '';
+  sessionPerms = { input: true, clipboard: true, file: true };
+  drawMode = false;
+  if ($('drawToggle')) $('drawToggle').classList.remove('active');
+  if ($('drawClear')) $('drawClear').hidden = true;
+  if ($('screen')) $('screen').classList.remove('draw-cursor');
+  if ($('quality')) $('quality').disabled = true;
+  if ($('sendFileBtn')) $('sendFileBtn').disabled = true;
+  if ($('chat')) $('chat').hidden = true;
+  if ($('chatLog')) $('chatLog').innerHTML = '';
+  if (pc) { pc.close(); pc = null; }
+  $('screen').srcObject = null;
+  setStatus('session ended');
+  log('session ended');
+}
+
+// ---- Milestone B: capture local input and send to the host ----
+
+const BUTTONS = { 0: 'left', 1: 'middle', 2: 'right' };
+
+// Normalize a pointer position to 0..1 over the actual video content, undoing
+// the letterboxing from object-fit: contain.
+function normCoords(video, clientX, clientY) {
+  const rect = video.getBoundingClientRect();
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  if (!vw || !vh) return null;
+  const scale = Math.min(rect.width / vw, rect.height / vh);
+  const dispW = vw * scale;
+  const dispH = vh * scale;
+  const offX = rect.left + (rect.width - dispW) / 2;
+  const offY = rect.top + (rect.height - dispH) / 2;
+  const x = (clientX - offX) / dispW;
+  const y = (clientY - offY) / dispH;
+  if (x < 0 || x > 1 || y < 0 || y > 1) return null; // outside the screen area
+  return { x, y };
+}
+
+function attachInputCapture(video, channel) {
+  const send = (ev) => {
+    if (!sessionPerms.input) return;
+    if (channel.readyState === 'open') channel.send(JSON.stringify(ev));
+  };
+
+  video.tabIndex = 0;
+  video.addEventListener('click', () => video.focus());
+
+  // Send one annotation line segment (normalized coords) to the host overlay.
+  const sendStroke = (p0, p1) => {
+    if (!controlChannel || controlChannel.readyState !== 'open') return;
+    controlChannel.send(JSON.stringify({
+      kind: 'annotate', op: 'draw',
+      stroke: { x0: p0.x, y0: p0.y, x1: p1.x, y1: p1.y, color: '#ff2d55' },
+    }));
+  };
+  let drawing = false;
+  let lastPt = null;
+
+  // Throttle mouse-moves to ~60/s. Un-throttled, a fast drag floods the host
+  // with events and can freeze it; 60/s is smooth and safe.
+  let lastMove = 0;
+  video.addEventListener('mousemove', (e) => {
+    const now = performance.now();
+    if (now - lastMove < 16) return;
+    lastMove = now;
+    const p = normCoords(video, e.clientX, e.clientY);
+    if (!p) return;
+    if (drawMode) {
+      if (drawing && lastPt) sendStroke(lastPt, p);
+      lastPt = p;
+    } else {
+      send({ kind: 'move', x: p.x, y: p.y });
+    }
+  });
+  video.addEventListener('mousedown', (e) => {
+    const p = normCoords(video, e.clientX, e.clientY);
+    if (!p) return;
+    if (drawMode) { drawing = true; lastPt = p; return; }
+    send({ kind: 'mousedown', button: BUTTONS[e.button] || 'left', x: p.x, y: p.y });
+  });
+  video.addEventListener('mouseup', (e) => {
+    const p = normCoords(video, e.clientX, e.clientY);
+    if (drawMode) { drawing = false; lastPt = null; return; }
+    if (p) send({ kind: 'mouseup', button: BUTTONS[e.button] || 'left', x: p.x, y: p.y });
+  });
+  video.addEventListener('contextmenu', (e) => e.preventDefault()); // let right-click pass through
+  video.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    send({ kind: 'wheel', dy: Math.sign(e.deltaY) });
+  }, { passive: false });
+
+  // Keyboard is handled globally (see DOMContentLoaded) so it doesn't depend on
+  // the <video> keeping focus.
+  log('input capture attached — click the screen to control; type anywhere');
+}

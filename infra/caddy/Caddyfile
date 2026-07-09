@@ -1,0 +1,17 @@
+# Production TLS for the UpDesk signaling server (real, auto-renewing cert).
+#
+# When you have a domain: point its A record at this host, then run:
+#   caddy run --config infra/caddy/Caddyfile
+# Caddy provisions + renews a Let's Encrypt cert automatically.
+#
+# Behind Caddy, run the signaling server as PLAIN ws:// (do NOT set TLS_CERT/
+# TLS_KEY) — Caddy terminates TLS and proxies to it:
+#   cargo run -p signaling-server            # ws://127.0.0.1:8080
+#
+# Then the apps use wss://updesk.example.com with a REAL cert, so remove the
+# `--ignore-certificate-errors-spki-list=...` pin from the apps' tauri.conf.json
+# (production builds don't need it).
+
+updesk.example.com {
+	reverse_proxy 127.0.0.1:8080
+}

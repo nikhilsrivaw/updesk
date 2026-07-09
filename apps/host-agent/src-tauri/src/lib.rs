@@ -1,0 +1,320 @@
+// UpDesk host agent — native side.
+//
+// The webview handles WebRTC + screen capture. The Rust side does what a
+// webview can't: inject the controller's input events into the OS via `enigo`
+// (SendInput on Windows). Coordinates arrive normalized (0..1) relative to the
+// shared screen and are mapped to real pixels here.
+
+use arboard::Clipboard;
+use enigo::{
+    Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings,
+};
+use serde_json::Value;
+use std::sync::{Mutex, OnceLock};
+use tauri_plugin_autostart::ManagerExt;
+
+// One persistent Enigo for the whole process. Creating a fresh Enigo per event
+// (mouse-move fires many times/second) floods the input thread and freezes the
+// host, so we init once and reuse it under a Mutex.
+fn enigo() -> &'static Mutex<Enigo> {
+    static ENIGO: OnceLock<Mutex<Enigo>> = OnceLock::new();
+    ENIGO.get_or_init(|| {
+        Mutex::new(Enigo::new(&Settings::default()).expect("failed to init input engine"))
+    })
+}
+
+// Launch-at-login toggle, for leaving a machine set up for unattended support.
+#[tauri::command]
+fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    let m = app.autolaunch();
+    if enabled { m.enable() } else { m.disable() }.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_autostart(app: tauri::AppHandle) -> bool {
+    app.autolaunch().is_enabled().unwrap_or(false)
+}
+
+// This machine's LAN IP — the address a controller on the same WiFi should use.
+// Trick: "connect" a UDP socket to a public IP (no packets are actually sent)
+// and read back which local interface the OS picked. Works on any network.
+#[tauri::command]
+fn local_ip() -> Option<String> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("8.8.8.8:80").ok()?;
+    sock.local_addr().ok().map(|a| a.ip().to_string())
+}
+
+// ---- annotation overlay (whiteboard) ------------------------------------
+// A transparent, click-through, always-on-top window covering the screen. The
+// controller's strokes are drawn on it so the person AT the host sees them.
+// Click-through means it never blocks the host user's (or injected) input.
+use tauri::{Emitter, Manager};
+
+// Build the overlay window ONCE at startup (hidden + click-through). Creating a
+// webview window from inside a command deadlocks on the main-thread event loop,
+// so we do it in setup() where it's safe, then only show/hide/emit at runtime.
+fn create_overlay(app: &tauri::AppHandle) -> Result<(), String> {
+    if app.get_webview_window("overlay").is_some() {
+        return Ok(());
+    }
+    let (w, h, x, y) = match app.primary_monitor().ok().flatten() {
+        Some(m) => {
+            let s = m.size();
+            let p = m.position();
+            (s.width as f64, s.height as f64, p.x as f64, p.y as f64)
+        }
+        None => (1920.0, 1080.0, 0.0, 0.0),
+    };
+    let win = tauri::WebviewWindowBuilder::new(
+        app,
+        "overlay",
+        tauri::WebviewUrl::App("overlay.html".into()),
+    )
+    .transparent(true)
+    .decorations(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .focused(false)
+    .shadow(false)
+    .visible(false) // stays hidden until annotate_show
+    .inner_size(w, h)
+    .position(x, y)
+    .title("UpDesk annotation")
+    .build()
+    .map_err(|e| { eprintln!("[overlay] build FAILED: {e}"); e.to_string() })?;
+
+    // Click-through so it can never block the host's input.
+    win.set_ignore_cursor_events(true)
+        .map_err(|e| { eprintln!("[overlay] ignore_cursor FAILED: {e}"); e.to_string() })?;
+    eprintln!("[overlay] pre-created ({w}x{h} at {x},{y})");
+    Ok(())
+}
+
+#[tauri::command]
+fn annotate_show(app: tauri::AppHandle) -> Result<(), String> {
+    let win = app
+        .get_webview_window("overlay")
+        .ok_or("overlay window missing")?;
+    win.set_ignore_cursor_events(true).ok(); // re-assert click-through
+    win.show().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn annotate_draw(app: tauri::AppHandle, stroke: Value) {
+    let _ = app.emit_to("overlay", "draw", stroke);
+}
+
+#[tauri::command]
+fn annotate_clear(app: tauri::AppHandle) {
+    let _ = app.emit_to("overlay", "clear", ());
+}
+
+#[tauri::command]
+fn annotate_hide(app: tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("overlay") {
+        let _ = app.emit_to("overlay", "clear", ()); // wipe ink before hiding
+        let _ = w.hide();
+    }
+}
+
+#[tauri::command]
+fn input_event(event: Value) {
+    // Only log failures — never the event contents, which would leak keystrokes
+    // (incl. remotely-typed passwords) into the process output.
+    if let Err(e) = inject(&event) {
+        let kind = event.get("kind").and_then(Value::as_str).unwrap_or("?");
+        eprintln!("[input] injection error on '{kind}': {e:?}");
+    }
+}
+
+// Clipboard bridge for text sync between the two machines. Best-effort: a
+// clipboard that's momentarily locked by another app just yields "".
+#[tauri::command]
+fn get_clipboard() -> String {
+    Clipboard::new()
+        .and_then(|mut c| c.get_text())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+fn set_clipboard(text: String) {
+    if let Ok(mut c) = Clipboard::new() {
+        let _ = c.set_text(text);
+    }
+}
+
+// Save a received file (base64) into Downloads/UpDesk, never overwriting an
+// existing file. Returns the final path for display.
+#[tauri::command]
+fn save_download(name: String, data: String) -> Result<String, String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data.as_bytes())
+        .map_err(|e| e.to_string())?;
+    let dir = dirs::download_dir()
+        .ok_or("no Downloads folder")?
+        .join("UpDesk");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = unique_path(dir.join(sanitize(&name)));
+    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+    Ok(path.display().to_string())
+}
+
+// Strip any directory components / illegal chars so a hostile name can't escape
+// the target folder.
+fn sanitize(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let cleaned: String = base
+        .chars()
+        .map(|c| if "<>:\"|?*".contains(c) || c.is_control() { '_' } else { c })
+        .collect();
+    let cleaned = cleaned.trim().trim_matches('.').to_string();
+    if cleaned.is_empty() { "file".into() } else { cleaned }
+}
+
+// If `path` exists, append " (1)", " (2)", … before the extension.
+fn unique_path(path: std::path::PathBuf) -> std::path::PathBuf {
+    if !path.exists() {
+        return path;
+    }
+    let parent = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("file").to_string();
+    let ext = path.extension().and_then(|s| s.to_str()).map(|e| format!(".{e}")).unwrap_or_default();
+    for n in 1.. {
+        let cand = parent.join(format!("{stem} ({n}){ext}"));
+        if !cand.exists() {
+            return cand;
+        }
+    }
+    path
+}
+
+fn inject(event: &Value) -> Result<(), Box<dyn std::error::Error>> {
+    let mut enigo = enigo().lock().map_err(|_| "input engine poisoned")?;
+    let kind = event.get("kind").and_then(Value::as_str).unwrap_or("");
+
+    match kind {
+        "move" | "mousedown" | "mouseup" | "click" => {
+            if let (Some(nx), Some(ny)) = (
+                event.get("x").and_then(Value::as_f64),
+                event.get("y").and_then(Value::as_f64),
+            ) {
+                let (w, h) = enigo.main_display()?;
+                let x = (nx * w as f64).round() as i32;
+                let y = (ny * h as f64).round() as i32;
+                enigo.move_mouse(x, y, Coordinate::Abs)?;
+            }
+            if kind != "move" {
+                let button = match event.get("button").and_then(Value::as_str).unwrap_or("left") {
+                    "right" => Button::Right,
+                    "middle" => Button::Middle,
+                    _ => Button::Left,
+                };
+                let dir = match kind {
+                    "mousedown" => Direction::Press,
+                    "mouseup" => Direction::Release,
+                    _ => Direction::Click,
+                };
+                enigo.button(button, dir)?;
+            }
+        }
+        "wheel" => {
+            let dy = event.get("dy").and_then(Value::as_i64).unwrap_or(0) as i32;
+            if dy != 0 {
+                enigo.scroll(dy, Axis::Vertical)?;
+            }
+        }
+        "keydown" | "keyup" => {
+            let down = kind == "keydown";
+            let key_str = event.get("key").and_then(Value::as_str).unwrap_or("");
+
+            if let Some(named) = map_named_key(key_str) {
+                // Named keys (Enter, arrows, modifiers, …) resolve to real
+                // virtual keys, so press/release works — this keeps held keys
+                // and modifier combos (Ctrl, Shift, …) behaving correctly.
+                if matches!(key_str, "Control" | "Alt" | "Meta") {
+                    MODS_HELD.fetch_update(std::sync::atomic::Ordering::Relaxed,
+                        std::sync::atomic::Ordering::Relaxed,
+                        |v| Some(if down { v + 1 } else { v.saturating_sub(1) })).ok();
+                }
+                let dir = if down { Direction::Press } else { Direction::Release };
+                enigo.key(named, dir)?;
+            } else if key_str.chars().count() == 1 {
+                let c = key_str.chars().next().unwrap();
+                let mods = MODS_HELD.load(std::sync::atomic::Ordering::Relaxed) > 0;
+                if mods {
+                    // Shortcut (e.g. Ctrl+C): press the real key so it combines
+                    // with the held modifier. Works for layout keys; a
+                    // shift-requiring char here is a rare edge and just logged.
+                    let dir = if down { Direction::Press } else { Direction::Release };
+                    enigo.key(Key::Unicode(c), dir)?;
+                } else if down {
+                    // Plain typing: inject the character directly. `Key::Unicode`
+                    // press/release can't type shift-requiring chars (uppercase,
+                    // symbols) on Windows; `text()` handles any character.
+                    enigo.text(key_str)?;
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+// Count of currently-held modifier keys (Ctrl/Alt/Meta), used to decide whether
+// a printable key is part of a shortcut or plain typing.
+static MODS_HELD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+// Map a JS KeyboardEvent.key to a *named* enigo Key. Returns None for printable
+// characters — those are handled separately (typed via `text()`).
+fn map_named_key(k: &str) -> Option<Key> {
+    Some(match k {
+        "Enter" => Key::Return,
+        "Backspace" => Key::Backspace,
+        "Tab" => Key::Tab,
+        "Escape" => Key::Escape,
+        " " | "Spacebar" => Key::Space,
+        "ArrowLeft" => Key::LeftArrow,
+        "ArrowRight" => Key::RightArrow,
+        "ArrowUp" => Key::UpArrow,
+        "ArrowDown" => Key::DownArrow,
+        "Shift" => Key::Shift,
+        "Control" => Key::Control,
+        "Alt" => Key::Alt,
+        "Meta" => Key::Meta,
+        "Delete" => Key::Delete,
+        "Home" => Key::Home,
+        "End" => Key::End,
+        "PageUp" => Key::PageUp,
+        "PageDown" => Key::PageDown,
+        "CapsLock" => Key::CapsLock,
+        _ => return None,
+    })
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
+        .invoke_handler(tauri::generate_handler![
+            input_event,
+            get_clipboard,
+            set_clipboard,
+            save_download,
+            set_autostart,
+            get_autostart,
+            local_ip,
+            annotate_show,
+            annotate_draw,
+            annotate_clear,
+            annotate_hide
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
