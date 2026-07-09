@@ -28,6 +28,19 @@ if (!TOKEN) {
 const ws = new WebSocket(URL, { rejectUnauthorized: false });
 const send = (o) => ws.send(JSON.stringify(o));
 
+// The 9-digit connect ID the server assigns — same FNV-1a as the server/native
+// host, so we can show it here from just the identity id (no server change).
+function connectId(identityId) {
+  const mask = (1n << 64n) - 1n;
+  let h = 1469598103934665603n & mask;
+  for (const b of Buffer.from(String(identityId), 'utf8')) {
+    h = (h ^ BigInt(b)) & mask;
+    h = (h * 1099511628211n) & mask;
+  }
+  return (h % 1000000000n).toString().padStart(9, '0');
+}
+const fmtId = (id) => `${id.slice(0, 3)} ${id.slice(3, 6)} ${id.slice(6, 9)}`;
+
 const REQUEST = {
   identities: { type: 'admin_identities' },
   devices: { type: 'admin_devices' },
@@ -50,10 +63,13 @@ ws.on('message', (raw) => {
       console.error('error:', m.message);
       break;
     case 'admin_identities':
-      console.table(m.identities);
+      console.table(m.identities.map((i) => ({
+        identityId: i.identityId, kind: i.kind, connectId: fmtId(connectId(i.identityId))
+      })));
       break;
     case 'admin_devices':
-      console.log('online devices:', m.devices.length ? m.devices.join(', ') : '(none)');
+      if (!m.devices.length) { console.log('online devices: (none)'); break; }
+      console.table(m.devices.map((d) => ({ device: d, connectId: fmtId(connectId(d)) })));
       break;
     case 'admin_sessions':
       console.table(m.sessions.map((s) => ({
