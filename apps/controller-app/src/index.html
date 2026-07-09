@@ -51,8 +51,9 @@
         <video id="screen" autoplay playsinline></video>
         <div id="fsPanel" hidden>
           <div class="fs-header">
-            <button id="fsUp" class="small" title="Back to parent folder">⬆ Back</button>
-            <span id="fsPath" class="fs-pathbar">/sdcard</span>
+            <button id="fsUp" class="small" title="Back to parent folder">⬆</button>
+            <input id="fsPath" class="fs-pathinput" placeholder="/storage/emulated/0" spellcheck="false" />
+            <button id="fsGo" class="small">Go</button>
             <button id="fsClose" class="small">✕</button>
           </div>
           <div id="fsList"></div>

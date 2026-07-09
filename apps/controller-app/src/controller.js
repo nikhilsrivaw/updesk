@@ -141,7 +141,7 @@ function fsGet(path) { if (fsChannel && fsChannel.readyState === 'open') fsChann
 function renderFsListing(m) {
   clearTimeout(fsTimer);
   fsCurrentPath = m.path;
-  $('fsPath').textContent = m.path;
+  $('fsPath').value = m.path;
   fsStatus((m.entries || []).length + ' items');
   const box = $('fsList');
   box.innerHTML = '';
@@ -327,6 +327,10 @@ window.addEventListener('DOMContentLoaded', () => {
     }
     if (parent) fsList(parent);
   });
+  // Editable address bar: type a path and Go (or Enter) to jump there.
+  const gotoPath = () => { const p = $('fsPath').value.trim(); if (p) fsList(p); };
+  $('fsGo').addEventListener('click', gotoPath);
+  $('fsPath').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); gotoPath(); } });
   $('fsClose').addEventListener('click', () => { $('fsPanel').hidden = true; });
   // Collapse the panel to just its header (and back).
   const toggleMin = () => {

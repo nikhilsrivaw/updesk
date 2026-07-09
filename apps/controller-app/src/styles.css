@@ -272,3 +272,17 @@ button.small.danger { background: #d9534f; }
 /* CRITICAL: the hidden attribute must beat any display:flex on panels, or
    panels (Evidence log, Files, chat) stay visible and stack on top of each other. */
 [hidden] { display: none !important; }
+
+/* Editable file-path address bar */
+.fs-pathinput {
+  flex: 1;
+  min-width: 0;
+  background: #1a1d22;
+  color: #e8eaed;
+  border: 1px solid #2a2e35;
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-family: ui-monospace, monospace;
+}
+.fs-pathinput:focus { outline: none; border-color: #2563eb; }
