@@ -9,6 +9,7 @@
 //   UPDESK_URL — signaling server (default wss://updesk.duckdns.org)
 
 mod capture;
+mod input;
 
 use anyhow::Result;
 use base64::Engine;
@@ -46,6 +47,7 @@ async fn main() -> Result<()> {
     println!("Native host identity: {}", identity.id);
 
     let api = Arc::new(build_api()?);
+    let input_tx = input::spawn(); // dedicated input-injection thread
 
     let (ws, _) = connect_async(&url).await?;
     println!("Connected to {url}");
@@ -99,7 +101,7 @@ async fn main() -> Result<()> {
                 }
                 println!("unattended connect accepted — streaming screen");
                 send(&write, json!({ "type": "session_response", "sessionId": sid, "accepted": true })).await?;
-                match start_session(&api, &write, sid.clone()).await {
+                match start_session(&api, &write, sid.clone(), input_tx.clone()).await {
                     Ok(new_pc) => pc = Some(new_pc),
                     Err(e) => eprintln!("session setup failed (host stays online): {e}"),
                 }
@@ -135,7 +137,7 @@ async fn main() -> Result<()> {
 }
 
 // Build one WebRTC session: peer connection + screen track + offer.
-async fn start_session(api: &Arc<API>, write: &SharedWrite, sid: String) -> Result<Arc<RTCPeerConnection>> {
+async fn start_session(api: &Arc<API>, write: &SharedWrite, sid: String, input_tx: std::sync::mpsc::Sender<Value>) -> Result<Arc<RTCPeerConnection>> {
     let config = RTCConfiguration {
         ice_servers: vec![
             RTCIceServer { urls: vec!["stun:stun.l.google.com:19302".into()], ..Default::default() },
@@ -156,6 +158,17 @@ async fn start_session(api: &Arc<API>, write: &SharedWrite, sid: String) -> Resu
         "updesk-screen".to_owned(),
     ));
     pc.add_track(track.clone()).await?;
+
+    // Input channel: controller sends mouse/keyboard events here; inject natively.
+    let input_dc = pc.create_data_channel("input", None).await?;
+    input_dc.on_message(Box::new(move |msg| {
+        let itx = input_tx.clone();
+        Box::pin(async move {
+            if let Ok(v) = serde_json::from_slice::<Value>(&msg.data) {
+                let _ = itx.send(v);
+            }
+        })
+    }));
 
     // Diagnostics: watch the connection come up (or not).
     pc.on_peer_connection_state_change(Box::new(|s| {
