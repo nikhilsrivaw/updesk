@@ -1,0 +1,137 @@
+\chapter{Introduction}
+
+The ability to operate a computer that is physically somewhere else has moved
+from a specialist convenience to an assumed capability. A support engineer
+expects to reach a customer's laptop without travelling to it; an administrator
+expects to reach a rack-mounted server that has no monitor attached; a student
+expects to reach the laboratory machine that holds a licensed toolchain. Each of
+these situations is served today, but rarely by the same tool and rarely without
+a compromise the user is asked to accept silently.
+
+This chapter states the motivation for building a new remote desktop system,
+defines the problem precisely, lists the objectives that guided the design, and
+outlines how the remainder of the report is organised.
+
+\section{Overview}
+
+A remote desktop system performs three tasks continuously and must perform all
+three well. It \emph{captures} the visual state of the controlled machine, it
+\emph{transports} that state to the controlling machine, and it \emph{returns}
+keyboard and pointer events in the opposite direction. The difficulty is that
+these tasks pull against one another. Capturing at high fidelity produces more
+data than a residential uplink can carry; compressing aggressively introduces
+delay that makes the pointer feel detached from the hand; and transporting
+anything at all requires that two machines which may both be hidden behind
+network address translation somehow find a path to each other.
+
+Existing systems resolve this tension in different places. Microsoft's Remote
+Desktop Protocol achieves excellent efficiency by transmitting drawing
+primitives rather than pixels, but it is tied to the Windows display stack and
+assumes a routable address or a corporate gateway. Virtual Network Computing
+transmits framebuffer rectangles and is admirably portable, but it was designed
+for local networks and its bandwidth behaviour on a wide-area link is poor.
+Commercial products such as TeamViewer and AnyDesk solve reachability elegantly
+by routing every session through vendor-operated relays, and in doing so place
+the vendor in a position of complete visibility over traffic the user may regard
+as sensitive.
+
+\updesk{} takes the position that the reachability problem and the trust problem
+are separable. Reachability is a well-studied networking question with a
+standard answer --- the ICE framework, with STUN for address discovery and TURN
+as a fallback relay. Trust is a cryptographic question, and the answer is to
+ensure that whatever infrastructure assists with reachability is structurally
+incapable of reading the session. WebRTC provides both: ICE for connectivity and
+mandatory DTLS-SRTP for media encryption, with keys negotiated directly between
+the endpoints. A signaling server is still required to introduce the peers, but
+it handles only metadata.
+
+\section{Motivation}
+
+Three observations motivated this work.
+
+\textbf{Relay-mediated architectures concentrate risk.} When every frame of a
+support session traverses a third party's servers, the confidentiality of that
+session rests entirely on the operator's policy and competence rather than on
+mathematics. A design in which the coordinating server never holds a media key
+removes that dependence. This is not a hypothetical concern for an
+administrator entering credentials on a remote machine during a support call.
+
+\textbf{Unattended access is where most remote desktop tools quietly fail.} A
+system that requires a human at the far end to click ``accept'' is adequate for
+support but useless for the server in the corner that needs attention at two in
+the morning. Genuine unattended operation requires the host to run before any
+user logs in, to survive reboots, and to remain usable while Windows displays
+its login screen or a User Account Control prompt. Those screens are drawn on a
+separate, isolated desktop that an ordinary user-session application cannot
+capture. Meeting this requirement is a systems problem, not a user-interface
+problem, and it drove much of the architecture described in Chapter~4.
+
+\textbf{Systems languages have become practical for this class of software.}
+Remote desktop hosts handle untrusted network input while manipulating raw
+framebuffers --- historically a rich source of memory-safety vulnerabilities.
+Rust offers memory safety without a garbage collector, and its asynchronous
+ecosystem is now mature enough to implement WebRTC, TLS termination and video
+encoding in one coherent codebase. Building \updesk{} predominantly in Rust was
+therefore both an engineering and a security decision.
+
+\section{Problem Statement}
+
+\emph{To design and implement a cross-platform remote desktop system in which
+screen and control data travel over a directly negotiated, end-to-end encrypted
+peer-to-peer channel; in which the coordinating server authenticates endpoints
+cryptographically but cannot decrypt session content; and which additionally
+provides a fully unattended host capable of operating from system boot,
+including on privileged desktops that conventional user-session applications
+cannot capture.}
+
+\section{Objectives}
+
+The work was directed at the following objectives.
+
+\begin{enumerate}
+  \item To design a signaling protocol that authenticates hosts and controllers
+        using Ed25519 public-key cryptography, resists replay through a
+        challenge--response exchange, and exposes no session content to the
+        server.
+  \item To implement that signaling server in Rust with optional TLS termination
+        and optional persistence of enrolled identities and session audit
+        records.
+  \item To implement a graphical host application and a graphical controller
+        application that establish a WebRTC peer connection, stream video in one
+        direction and control events in the other.
+  \item To implement a headless native host that captures the framebuffer
+        without any user gesture, encodes it to H.264, and serves it over a
+        native WebRTC peer connection.
+  \item To implement native keyboard and pointer injection so that the native
+        host supports control and not merely observation.
+  \item To package the native host as a Windows service so that it is present
+        from boot, survives reboot and session switching, and can reach the
+        active desktop.
+  \item To evaluate the resulting system for connection-establishment success
+        across NAT configurations, interactive latency, frame rate and bandwidth
+        consumption.
+\end{enumerate}
+
+\section{Scope and Limitations}
+
+The implementation targets Windows as the host platform, because the unattended
+and secure-desktop requirements are inherently platform-specific and Windows
+presents the hardest version of that problem. The controller application is
+portable, and exploratory Android clients exist in the repository but are not
+claimed as completed contributions. Audio forwarding and file transfer were
+deliberately excluded in order to keep the video and control paths correct
+before adding surface area. Multi-monitor capture is limited to the primary
+display. These boundaries are revisited in Chapter~7 as directions for further
+work.
+
+\section{Organisation of the Report}
+
+Chapter~2 surveys existing remote desktop protocols and products and the
+underlying real-time communication technologies, and identifies the gap this
+work addresses. Chapter~3 records the functional, non-functional and
+environmental requirements. Chapter~4 presents the system architecture: the
+component decomposition, the signaling protocol, the connection-establishment
+sequence, and the security model. Chapter~5 describes the implementation of each
+subsystem with reference to the actual codebase. Chapter~6 reports the
+experimental setup and the measurements obtained. Chapter~7 concludes and
+proposes future work.

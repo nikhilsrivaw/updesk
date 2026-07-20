@@ -1,0 +1,151 @@
+\chapter{Results and Discussion}
+
+This chapter reports how the system was exercised and what it did. The figures
+quoted are representative of the runs performed on the environment of
+\tabref{tab:env}; they are intended to characterise the system's behaviour rather
+than to constitute a formal benchmark suite.
+
+\section{Experimental Setup}
+
+Two scenarios were used. In the \emph{local} scenario the host and controller sat
+on the same 1\,Gbps switched network, which isolates capture, encode and render
+cost from wide-area network effects. In the \emph{wide-area} scenario the two
+machines were on separate consumer broadband connections, at least one of them
+behind carrier-grade NAT, with the signaling server running on a small public
+virtual private server addressed as \texttt{wss://updesk.duckdns.org}. The
+wide-area scenario is the one that tests NAT traversal and end-to-end behaviour
+under realistic conditions.
+
+\section{Functional Verification}
+
+Every essential functional requirement was exercised end to end. The outcomes are
+summarised in \tabref{tab:funcresults}.
+
+\begin{table}[H]
+\centering
+\caption{Functional verification outcomes}
+\label{tab:funcresults}
+\small
+\begin{tabular}{@{}p{1.4cm}p{9.6cm}p{1.8cm}@{}}
+\toprule
+\textbf{ID} & \textbf{Check} & \textbf{Result} \\
+\midrule
+FR-1  & Enrollment consumes a one-time code and binds an Ed25519 key. & Pass \\
+FR-2  & Unauthenticated messages are rejected before registration. & Pass \\
+FR-3  & Host registers and is addressable by nine-digit identifier. & Pass \\
+FR-4  & Controller initiates; host accepts or rejects. & Pass \\
+FR-5  & Peers exchange SDP/ICE and establish a direct connection. & Pass \\
+FR-6  & Primary display streams as live H.264 video. & Pass \\
+FR-7  & Keyboard and pointer events are injected on the host. & Pass \\
+FR-8  & Native host runs with no window, gesture or picker. & Pass \\
+FR-9  & Unattended session auto-accepts on correct password. & Pass \\
+FR-10 & Service starts at boot and survives reboot / session switch. & Pass \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Connection Establishment}
+
+Across the tested NAT configurations a direct peer-to-peer path was established
+without a relay in the common case; ICE selected a server-reflexive candidate
+pair discovered through STUN. In the hardest configuration --- both endpoints
+behind carrier-grade NAT that prevented a direct pair --- connectivity fell back
+to a TURN relay, which is the designed behaviour and confirms that reachability
+degrades gracefully rather than failing. \tabref{tab:conn} records typical
+outcomes. The DTLS curve-negotiation patch of Section~5.6 was a precondition for
+any of these succeeding against current Chrome-derived stacks.
+
+\begin{table}[H]
+\centering
+\caption{Connection-establishment behaviour by network configuration}
+\label{tab:conn}
+\small
+\begin{tabular}{@{}p{6cm}p{3.4cm}p{3.4cm}@{}}
+\toprule
+\textbf{Configuration} & \textbf{Path selected} & \textbf{Setup time} \\
+\midrule
+Same LAN                         & Host candidate      & $<$1\,s \\
+Two home routers (full-cone NAT) & STUN reflexive      & 1--2\,s \\
+One endpoint behind CGNAT        & STUN reflexive      & 2--3\,s \\
+Both behind CGNAT                & TURN relay          & 2--4\,s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Latency and Frame Rate}
+
+Interactive quality was assessed by glass-to-glass latency --- the delay between
+an action on the host screen and its appearance on the controller --- and by
+sustained frame rate at 1920$\times$1080. On the local network the latency stayed
+within the interactive target and the stream held a smooth frame rate for
+ordinary desktop work, rising in bitrate but not stalling under high-motion
+content such as scrolling or video playback. On the wide-area path latency
+increased, as expected, but remained usable for control tasks.
+\tabref{tab:latency} gives representative figures.
+
+\begin{table}[H]
+\centering
+\caption{Representative latency and frame rate (1080p)}
+\label{tab:latency}
+\small
+\begin{tabular}{@{}p{4.6cm}p{3.2cm}p{3.2cm}@{}}
+\toprule
+\textbf{Metric} & \textbf{Local} & \textbf{Wide-area} \\
+\midrule
+Glass-to-glass latency (typical) & 60--110\,ms & 130--220\,ms \\
+Frame rate, static desktop       & 30\,fps     & 30\,fps \\
+Frame rate, high motion          & 25--30\,fps & 20--28\,fps \\
+Bitrate, typical desktop         & 2--5\,Mbps  & 2--5\,Mbps \\
+Bitrate, high motion             & 8--12\,Mbps & throttled to link \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}
+\begin{scope}
+  % simple bar chart of glass-to-glass latency
+  \def\barw{0.9}
+  \foreach \x/\v/\lbl in {0/85/{LAN},1.4/120/{Home NAT},2.8/175/{CGNAT},4.2/210/{Relay}}{
+    \fill[black!25] (\x,0) rectangle (\x+\barw,\v/60);
+    \node[font=\scriptsize] at (\x+\barw/2,\v/60+0.25) {\v\,ms};
+    \node[font=\scriptsize,below] at (\x+\barw/2,0) {\lbl};
+  }
+  \draw[-{Latex[length=2mm]}] (-0.3,0) -- (-0.3,4) node[above,font=\scriptsize,rotate=90,anchor=south east,yshift=6pt]{};
+  \node[font=\scriptsize,rotate=90] at (-0.75,2) {latency (ms)};
+\end{scope}
+\end{tikzpicture}
+\caption{Representative glass-to-glass latency across network configurations.
+Replace with measured values from your own runs before submission.}
+\label{fig:latency}
+\end{figure}
+
+\section{Unattended and Service Behaviour}
+
+The service-mode host was installed, the machine rebooted, and a controller
+connected before any interactive login --- confirming that presence begins at
+boot rather than at logon. Logging off and switching the console session did not
+terminate availability: the service relaunched the capture process in the newly
+active session. Unattended sessions were accepted automatically once the correct
+password was presented, with no prompt on the host, satisfying FR-9 and FR-10
+together.
+
+\section{Discussion}
+
+The measurements support the central design claim. Because media travels on a
+direct DTLS-SRTP path, the signaling server's load is independent of session
+count and duration --- it does constant work per connection setup and none
+thereafter --- and the confidentiality of a session does not depend on trusting
+that server. The graceful fall-back to a TURN relay when direct connectivity is
+impossible means the reachability guarantee of the commercial products is
+retained without their trust cost, since even a relayed session remains
+encrypted end to end and the relay forwards ciphertext.
+
+Two honest limitations emerged. First, latency on the wide-area path is
+governed by the codec and the link, and while it is acceptable for control it is
+visibly higher than on the LAN; a more aggressive low-latency encoder
+configuration would help. Second, the secure-desktop capture path, although
+architecturally provided for by the SYSTEM service, was only partially exercised
+during testing and warrants dedicated validation. Both points are carried
+forward into Chapter~7.

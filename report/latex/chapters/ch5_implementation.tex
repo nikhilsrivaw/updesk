@@ -1,0 +1,156 @@
+\chapter{Implementation}
+
+This chapter describes how each component was built. The source is organised as a
+Cargo workspace with three Rust crates --- \texttt{signaling-server},
+\texttt{native-host} and \texttt{host-service} --- alongside Tauri applications
+for the attended host and the controller. The workspace deliberately excludes the
+Tauri applications from its shared build profile so that their front-end
+toolchains do not conflict with the systems crates.
+
+\section{Project Layout}
+
+\begin{table}[H]
+\centering
+\caption{Repository structure (principal paths)}
+\label{tab:layout}
+\small
+\begin{tabular}{@{}p{5cm}p{8.4cm}@{}}
+\toprule
+\textbf{Path} & \textbf{Contents} \\
+\midrule
+\texttt{crates/signaling-server} & The authentication and rendezvous server. \\
+\texttt{crates/native-host}      & The headless capture, encode, stream and input host. \\
+\texttt{crates/host-service}     & The Windows service that supervises the host in the active session. \\
+\texttt{apps/host-agent}         & Attended Tauri host (WebView2, \texttt{getDisplayMedia}). \\
+\texttt{apps/controller-app}     & Tauri controller application. \\
+\texttt{src/}, \texttt{shared/}  & Signaling logic and the shared client used during early milestones. \\
+\texttt{vendor/webrtc-dtls}      & Patched DTLS crate (see Section~5.6). \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Signaling Server}
+
+The server is an asynchronous Tokio program that accepts WebSocket connections
+through \texttt{tokio-tungstenite}. Each connection is driven by a small state
+machine: it is created in an unauthenticated state, a challenge is issued
+immediately, and no message other than \texttt{auth\_response} is processed until
+a valid signature has been verified with \texttt{ed25519-dalek}. Verified
+connections are recorded in an in-memory registry keyed by public key and, for
+hosts, by connect identifier, so that a controller's \texttt{connect\_request}
+can be routed to the correct socket.
+
+TLS is optional and, when enabled, is terminated in-process by
+\texttt{tokio-rustls} using the \texttt{ring} provider; the server reads a
+PKCS\#12 identity whose path is supplied through the environment. Persistence is
+likewise optional: when a database URL is configured, enrolled public keys and a
+per-session audit record are written to PostgreSQL through \texttt{sqlx}. Neither
+feature is required to run the system, which keeps the development loop light.
+
+\begin{lstlisting}[language=Rust,caption={Authentication gate, in essence.}]
+// A connection is unauthenticated until it proves possession of an enrolled key.
+let nonce = random_nonce();
+send(&mut ws, json!({ "type": "auth_init", "nonce": b64(&nonce) })).await?;
+
+let resp = recv(&mut ws).await?;              // expect auth_response
+let pubkey  = decode_pubkey(&resp["pubkey"])?;
+let sig     = decode_sig(&resp["sig"])?;
+
+if !enrolled.contains(&pubkey) { return reject("unknown key"); }
+pubkey.verify_strict(&nonce, &sig)            // reject on any error
+      .map_err(|_| reject("bad signature"))?;
+// ...only now is the socket promoted to authenticated and allowed to register.
+\end{lstlisting}
+
+\section{Native Host --- Capture and Encode}
+
+The native host is the component that removes the browser from the loop.
+Framebuffer acquisition uses the \texttt{scrap} crate, which wraps the Desktop
+Duplication API; each captured frame arrives as a BGRA buffer with a stride that
+must be respected when repacking. Frames are converted to the encoder's expected
+planar format and passed to OpenH264 through the \texttt{openh264} crate, which
+emits H.264 access units. This capture happens with no window, no permission
+prompt and no source picker --- the defining property recorded as FR-8 --- because
+a native process reads the composited desktop surface directly rather than
+requesting it through \texttt{getDisplayMedia}.
+
+The first milestone of the native host wrote a single captured frame to
+\texttt{native-capture.png} and a short encoded sequence to
+\texttt{native-capture.h264} to verify the capture and encode stages in
+isolation before any network code existed. This staged validation, one subsystem
+proven before the next was attempted, is reflected throughout the commit
+history.
+
+\section{Native Host --- WebRTC and Signaling}
+
+Encoded access units are written onto a video track created through
+\texttt{webrtc-rs}. The host builds a peer connection, adds the track, and drives
+the same signaling protocol as the graphical host: it authenticates with its
+Ed25519 key, registers under its connect identifier, and on an accepted request
+generates the SDP \texttt{offer}, consumes the controller's \texttt{answer}, and
+trickles ICE candidates. Because the host runs headless, acceptance of an
+unattended session is automatic once the presented password matches the
+configured unattended secret; there is no dialogue to click.
+
+\begin{lstlisting}[language=Rust,caption={Registering the native host after authentication.}]
+send(&ws, json!({
+    "type": "register",
+    "connect_id": self.connect_id,     // nine-digit identifier
+    "role": "host",
+})).await?;
+// then: await connect_request -> session_response(accept)
+//       -> create offer -> set_local_description -> relay via server
+\end{lstlisting}
+
+\section{Native Host --- Input Injection}
+
+Control is the reverse path. Pointer and keyboard events sent by the controller
+arrive as messages that the host translates into synthetic operating-system
+input. Two mechanisms are present: the cross-platform \texttt{enigo} crate for
+ordinary desktops, and a direct Win32 \texttt{SendInput} path for the cases where
+finer control or secure-desktop reach is required. Coordinates are mapped from
+the controller's view geometry to the host's display resolution before
+injection, so that a click lands where the operator intended regardless of any
+scaling applied to the video.
+
+\section{The DTLS Curve-Negotiation Patch}
+
+A concrete obstacle deserves recording because it shaped the workspace. Against
+current versions of Chrome, the DTLS handshake failed with an ``invalid named
+curve'' error. The cause was that recent Chrome offers a post-quantum key-exchange
+group first in its list, and the version of \texttt{webrtc-dtls} in use attempted
+to honour the browser's first preference rather than selecting the first group
+that both sides actually support. The fix, carried as a vendored patch in
+\texttt{vendor/webrtc-dtls} and wired in through a Cargo \texttt{[patch]} section,
+changes the negotiation to pick the first \emph{mutually} supported ECDHE curve.
+This is the kind of defect that closed transports hide from their users and open
+ones expose to repair; it is cited in the acknowledgements for that reason.
+
+\begin{lstlisting}[language=Rust,caption={Workspace patch redirecting webrtc-dtls to the fixed local copy.}]
+[patch.crates-io]
+webrtc-dtls = { path = "vendor/webrtc-dtls" }
+\end{lstlisting}
+
+\section{Windows Service and Session Handling}
+
+Unattended, pre-login presence is realised by registering the host as a Windows
+service. The \texttt{host-service} crate uses the \texttt{windows-service} and
+\texttt{windows} crates to install, start, stop and uninstall itself, and to run
+as SYSTEM in session~0. From that vantage it detects the active console session
+and ensures a capture process is running in whichever session and desktop is
+currently active, relaunching it across logon, lock and session-switch
+transitions. This is the mechanism by which the host is available from boot and
+can, in principle, reach the secure desktop on which the login screen and UAC
+prompts are drawn --- surfaces that no user-session application can capture.
+
+Installation is a single command (\texttt{host-service.exe install} followed by
+\texttt{sc start UpDeskHost}), after which the host survives reboot without
+further intervention, satisfying FR-10.
+
+\section{Administrative Tooling}
+
+A small administrative command lists enrolled devices and identities with their
+nine-digit connect identifiers, so that an operator can see which machines are
+registered and address them. The native host additionally supports an
+\texttt{id} command that prints its own connect identifier and unattended
+password, which is the information a remote operator needs in order to connect.

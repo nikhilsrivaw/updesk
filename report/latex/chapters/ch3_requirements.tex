@@ -1,0 +1,116 @@
+\chapter{Requirement Analysis}
+
+This chapter records the requirements that the system was built to satisfy,
+separated into functional behaviour, quality attributes, and the environment
+assumed by the implementation.
+
+\section{Functional Requirements}
+
+\tabref{tab:funcreq} lists the functional requirements, each with the
+identifier used elsewhere in the report.
+
+\begin{table}[H]
+\centering
+\caption{Functional requirements}
+\label{tab:funcreq}
+\small
+\begin{tabular}{@{}p{1.4cm}p{8.4cm}p{2.6cm}@{}}
+\toprule
+\textbf{ID} & \textbf{Requirement} & \textbf{Priority} \\
+\midrule
+FR-1 & A device or controller shall enroll using a single-use code and thereafter be identified by an Ed25519 public key. & Essential \\
+FR-2 & The signaling server shall authenticate every connection by a challenge--response signature before accepting any other message. & Essential \\
+FR-3 & A host shall register its availability and be addressable by a nine-digit connect identifier. & Essential \\
+FR-4 & A controller shall initiate a session by connect identifier and the host shall be able to accept or reject it. & Essential \\
+FR-5 & The peers shall exchange SDP offers, answers and ICE candidates through the signaling server and establish a direct peer connection. & Essential \\
+FR-6 & The host shall capture the primary display and transmit it as an encoded video stream. & Essential \\
+FR-7 & The controller shall transmit keyboard and pointer events, which the host shall inject into the local input queue. & Essential \\
+FR-8 & The native host shall operate with no window, no user gesture and no source picker. & Essential \\
+FR-9 & The native host shall accept unattended sessions automatically on presentation of a configured password. & Essential \\
+FR-10 & The native host shall install as a Windows service, start at boot and survive session switching. & Essential \\
+FR-11 & The signaling server shall optionally persist enrolled identities and a session audit log to PostgreSQL. & Desirable \\
+FR-12 & The signaling server shall optionally terminate TLS and serve \texttt{wss://}. & Desirable \\
+FR-13 & An administrative utility shall list enrolled devices with their connect identifiers. & Desirable \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Non-Functional Requirements}
+
+\subsection{Performance}
+
+Interactive remote control is unusable if the delay between an input event and
+the corresponding visual change is perceptible as lag. The target adopted was an
+end-to-end glass-to-glass latency below 150\,ms on a local network and below
+250\,ms over a typical broadband path, with a sustained frame rate of at least
+25\,frames per second at 1920$\times$1080. Bandwidth consumption was to remain
+within the capability of an ordinary residential uplink for typical desktop
+content.
+
+\subsection{Security}
+
+The signaling server must not be able to decrypt session media. Endpoint
+identity must rest on private keys that never leave the machine holding them.
+Enrollment must not be open: possession of a valid one-time code is required
+before a key is accepted. Unattended acceptance must be gated by a secret that
+is verified by the host rather than by the server.
+
+\subsection{Reliability and Availability}
+
+The service-mode host must return to service automatically after a reboot,
+after a user logs off, and after the console session is switched. Failure of the
+signaling server must not terminate sessions that have already established a
+direct peer connection, since the server is not on the media path.
+
+\subsection{Maintainability}
+
+The system is organised as a Cargo workspace with separate crates for the
+signaling server, the native host and the service supervisor, so that each can
+be built and tested in isolation. Protocol messages are JSON, which keeps them
+inspectable during development.
+
+\section{Hardware and Software Environment}
+
+\begin{table}[H]
+\centering
+\caption{Development and test environment}
+\label{tab:env}
+\small
+\begin{tabular}{@{}p{4.2cm}p{9cm}@{}}
+\toprule
+\textbf{Component} & \textbf{Specification} \\
+\midrule
+Host machine        & Windows 11 Pro (build 26200), x86-64, 16\,GB RAM \\
+Controller machine  & Windows 11, x86-64, 8\,GB RAM \\
+Language toolchain  & Rust (2021 edition), stable channel \\
+Async runtime       & Tokio \\
+WebRTC stack        & \texttt{webrtc-rs} 0.11, with a patched \texttt{webrtc-dtls} \\
+Video encoder       & OpenH264 via the \texttt{openh264} crate \\
+Screen capture      & \texttt{scrap} (Desktop Duplication) \\
+Input injection     & \texttt{enigo}, and the Win32 \texttt{SendInput} path \\
+Signaling transport & \texttt{tokio-tungstenite} over WebSocket / WSS \\
+Cryptography        & \texttt{ed25519-dalek} 2.x \\
+TLS                 & \texttt{tokio-rustls} with the \texttt{ring} provider \\
+Persistence         & PostgreSQL via \texttt{sqlx} (optional) \\
+GUI applications    & Tauri with a WebView2 front end \\
+Network             & 1\,Gbps switched LAN; consumer broadband with CGNAT for wide-area tests \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Feasibility Study}
+
+\textbf{Technical.} Every component has a viable Rust implementation, which was
+confirmed by prototyping the riskiest element first --- silent framebuffer
+capture --- before committing to the architecture. The one genuine technical
+obstacle encountered was a DTLS handshake failure against current Chrome
+versions, resolved as described in Section~5.6.
+
+\textbf{Economic.} All dependencies are open source. The only recurring cost is
+a modest virtual private server for signaling and an optional TURN relay, and
+because media is peer-to-peer the relay is exercised only in the minority of
+network configurations that defeat direct connectivity.
+
+\textbf{Operational.} The host installs as a service with a single command and
+requires no configuration beyond an enrollment code and an unattended password,
+which is comparable to the deployment effort of the commercial alternatives.

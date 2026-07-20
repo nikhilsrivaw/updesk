@@ -1,0 +1,263 @@
+\chapter{System Design}
+
+This chapter presents the architecture of \updesk{}. It begins with the overall
+component decomposition, then treats the signaling protocol, the
+connection-establishment sequence, the data model and the security reasoning in
+turn.
+
+\section{Architectural Overview}
+
+\updesk{} is composed of three cooperating roles and one coordinating service.
+The \emph{controller} is the machine from which a user drives a remote session.
+The \emph{host} is the machine being controlled; it exists in two forms, a
+graphical Tauri application for attended use and a headless native binary for
+unattended use. The \emph{signaling server} is a lightweight Rust process that
+introduces controllers to hosts and relays the messages needed to negotiate a
+peer connection, but carries no media. \figref{fig:arch} shows the arrangement.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  node distance=2.4cm and 3.2cm,
+  box/.style={draw,rounded corners,minimum width=3cm,minimum height=1.1cm,align=center,font=\small},
+  server/.style={draw,rounded corners,fill=black!8,minimum width=3.2cm,minimum height=1.1cm,align=center,font=\small},
+  sig/.style={-{Latex[length=2mm]},dashed,thick},
+  media/.style={-{Latex[length=2.6mm]},very thick}
+]
+  \node[server] (srv) {Signaling Server\\{\scriptsize (Rust, WSS)}};
+  \node[box, below left=of srv] (ctl) {Controller\\{\scriptsize (Tauri app)}};
+  \node[box, below right=of srv] (host) {Host\\{\scriptsize (native / Tauri)}};
+
+  \draw[sig] (ctl) -- (srv) node[midway,above,sloped,font=\scriptsize] {auth + SDP/ICE};
+  \draw[sig] (host) -- (srv) node[midway,above,sloped,font=\scriptsize] {auth + register};
+  \draw[media] (host) -- (ctl)
+      node[midway,below,font=\scriptsize,align=center] {direct WebRTC\\DTLS-SRTP media + control};
+
+  \node[font=\scriptsize,align=center,below=1.4cm of srv] {\textit{server sees metadata only ---}\\\textit{never the media keys}};
+\end{tikzpicture}
+\caption{Component architecture. Dashed lines are signaling; the solid line is
+the direct, end-to-end encrypted peer connection that carries screen frames and
+control events.}
+\label{fig:arch}
+\end{figure}
+
+The essential property visible in the figure is that the two solid endpoints
+exchange media directly. The signaling server sits on the dashed paths only. It
+authenticates both endpoints and passes their session descriptions back and
+forth, but once the peer connection is live the server can be removed without
+disturbing the session.
+
+\section{The Native Host Internals}
+
+The native host is the most involved component because it must do the work a
+browser would otherwise do, without a browser. \figref{fig:nativehost} shows its
+internal pipeline. A capture thread pulls framebuffers from the Desktop
+Duplication API; each frame is handed to an H.264 encoder; encoded access units
+are written onto a WebRTC video track; and, in the reverse direction, control
+messages arriving on a data channel are decoded into synthetic input events and
+injected into the desktop.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  stage/.style={draw,rounded corners,minimum width=2.5cm,minimum height=1cm,align=center,font=\scriptsize},
+  flow/.style={-{Latex[length=2mm]},thick},
+  node distance=0.9cm and 1.2cm
+]
+  \node[stage] (cap) {Capture\\{\tiny scrap / DXGI}};
+  \node[stage,right=of cap] (enc) {Encode\\{\tiny OpenH264}};
+  \node[stage,right=of enc] (track) {Video Track\\{\tiny webrtc-rs}};
+  \node[stage,right=of track] (pc) {Peer\\Connection};
+
+  \node[stage,below=1.6cm of track] (inj) {Input Inject\\{\tiny SendInput}};
+  \node[stage,left=of inj] (dc) {Control\\Channel};
+
+  \draw[flow] (cap) -- (enc);
+  \draw[flow] (enc) -- (track);
+  \draw[flow] (track) -- (pc);
+  \draw[flow] (pc.south) |- (dc);
+  \draw[flow] (dc) -- (inj);
+
+  \node[draw,dotted,fit=(cap)(enc)(track)(pc)(dc)(inj),inner sep=10pt,label={[font=\scriptsize]above:\textit{native-host process}}] {};
+\end{tikzpicture}
+\caption{Native host pipeline. The upper row is the outbound video path; the
+lower row is the inbound control path.}
+\label{fig:nativehost}
+\end{figure}
+
+\section{Signaling Protocol}
+
+All signaling messages are JSON objects distinguished by a \texttt{type} field
+and carried over a WebSocket (plain \texttt{ws://} in development,
+\texttt{wss://} in deployment). \tabref{tab:messages} enumerates the message
+types actually implemented by the server and the native host.
+
+\begin{table}[H]
+\centering
+\caption{Signaling message types}
+\label{tab:messages}
+\small
+\begin{tabular}{@{}p{3.2cm}p{2cm}p{7.6cm}@{}}
+\toprule
+\textbf{Message} & \textbf{Direction} & \textbf{Purpose} \\
+\midrule
+\texttt{auth\_init}      & server$\to$peer & Server issues a random challenge nonce. \\
+\texttt{auth\_response}  & peer$\to$server & Peer returns its public key and an Ed25519 signature over the nonce. \\
+\texttt{register}        & host$\to$server & Host announces availability under its connect identifier. \\
+\texttt{connect\_request}& controller$\to$server & Controller asks to reach a host by connect identifier. \\
+\texttt{session\_response}& host$\to$server & Host accepts or rejects the incoming request. \\
+\texttt{offer}           & host$\to$controller & SDP offer, relayed by the server. \\
+\texttt{answer}          & controller$\to$host & SDP answer, relayed by the server. \\
+\texttt{ice\_candidate}  & both & An ICE candidate, relayed as it is discovered. \\
+\texttt{end\_session}    & both & Orderly teardown of the signaling association. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Enrollment}
+
+Before a machine can authenticate it must enroll. Enrollment is gated by a
+single-use code of the form \texttt{DEV0-TEST:device} or
+\texttt{CTL0-TEST:controller}, seeded in the server's configuration and consumed
+on first use. During enrollment the peer generates an Ed25519 key pair, keeps
+the private key locally, and registers the public key against the code. From
+that point the public key \emph{is} the machine's identity; the code is spent
+and cannot be reused. This deliberately prevents anonymous participation: an
+attacker cannot register a host or controller without first obtaining a valid
+code out of band.
+
+\subsection{Authentication Handshake}
+
+Every WebSocket connection begins with the same challenge--response exchange,
+shown in \figref{fig:auth}, before any other message is honoured. The server
+sends \texttt{auth\_init} carrying a fresh random nonce. The peer signs that
+nonce with its Ed25519 private key and replies with \texttt{auth\_response}
+containing its public key and the signature. The server verifies the signature
+against the enrolled key. Because the nonce is random and single-use, a captured
+\texttt{auth\_response} cannot be replayed against a later challenge.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  font=\scriptsize,
+  actor/.style={draw,minimum width=2.4cm,minimum height=0.8cm},
+  msg/.style={-{Latex[length=2mm]}}
+]
+  \node[actor] (p) {Peer};
+  \node[actor,right=5.5cm of p] (s) {Server};
+  \draw[thick] (p.south) -- ++(0,-4.6);
+  \draw[thick] (s.south) -- ++(0,-4.6);
+  \coordinate (p0) at ($(p.south)+(0,-0.5)$);
+  \coordinate (s0) at ($(s.south)+(0,-0.5)$);
+  \draw[msg] ($(s0)$) -- ($(p0)$) node[midway,above]{\texttt{auth\_init}\{ nonce \}};
+  \coordinate (p1) at ($(p.south)+(0,-1.6)$);
+  \node[right=0.1cm of p1,align=left,font=\tiny] {sign(nonce, sk)};
+  \coordinate (p2) at ($(p.south)+(0,-2.4)$);
+  \coordinate (s2) at ($(s.south)+(0,-2.4)$);
+  \draw[msg] (p2) -- (s2) node[midway,above]{\texttt{auth\_response}\{ pk, sig \}};
+  \coordinate (s3) at ($(s.south)+(0,-3.2)$);
+  \node[left=0.1cm of s3,align=right,font=\tiny] {verify(sig, pk, nonce)\\lookup enrolled pk};
+  \coordinate (p4) at ($(p.south)+(0,-4.1)$);
+  \coordinate (s4) at ($(s.south)+(0,-4.1)$);
+  \draw[msg] (s4) -- (p4) node[midway,above]{authenticated};
+\end{tikzpicture}
+\caption{Ed25519 challenge--response authentication performed on every
+connection.}
+\label{fig:auth}
+\end{figure}
+
+\section{Connection Establishment}
+
+Once both endpoints are authenticated, establishing a session follows the
+sequence in \figref{fig:session}. The host registers and waits. A controller
+issues a \texttt{connect\_request} naming the host's nine-digit connect
+identifier. The server forwards the request; the host answers with
+\texttt{session\_response}. On acceptance the WebRTC negotiation begins: the host
+emits an SDP \texttt{offer}, the controller replies with an \texttt{answer}, and
+both sides trickle \texttt{ice\_candidate} messages as ICE discovers transport
+addresses. When a candidate pair succeeds, the DTLS handshake runs directly
+between the peers, SRTP keys are derived, and media begins to flow on the direct
+path. The server has by then done its entire job.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  font=\scriptsize,
+  actor/.style={draw,minimum width=2.2cm,minimum height=0.8cm},
+  msg/.style={-{Latex[length=2mm]}},
+  self/.style={-{Latex[length=2mm]}}
+]
+  \node[actor] (c) {Controller};
+  \node[actor,right=3.4cm of c] (s) {Server};
+  \node[actor,right=3.4cm of s] (h) {Host};
+  \foreach \n in {c,s,h}{\draw[thick] (\n.south) -- ++(0,-6.4);}
+
+  \newcommand{\line}[4]{%
+    \coordinate (a) at ($(#1.south)+(0,-#3)$);
+    \coordinate (b) at ($(#2.south)+(0,-#3)$);
+    \draw[msg] (a) -- (b) node[midway,above]{#4};}
+
+  \line{h}{s}{0.6}{\texttt{register}}
+  \line{c}{s}{1.4}{\texttt{connect\_request}(id)}
+  \line{s}{h}{2.1}{forward}
+  \line{h}{s}{2.9}{\texttt{session\_response}(accept)}
+  \line{h}{s}{3.7}{\texttt{offer} (SDP)}
+  \line{s}{c}{3.7}{}
+  \line{c}{s}{4.5}{\texttt{answer} (SDP)}
+  \line{s}{h}{4.5}{}
+  \line{c}{h}{5.3}{\texttt{ice\_candidate} $\leftrightarrow$ (via server)}
+  \draw[msg,very thick] ($(h.south)+(0,-6.1)$) -- ($(c.south)+(0,-6.1)$)
+      node[midway,above]{\textbf{direct DTLS-SRTP media}};
+\end{tikzpicture}
+\caption{Session-establishment sequence. After the final step the media path is
+direct and the server is no longer involved.}
+\label{fig:session}
+\end{figure}
+
+\section{Security Model}
+
+The security posture of \updesk{} rests on a clean division of responsibility.
+
+\textbf{Identity is a key, not a password.} Each participant is named by an
+Ed25519 public key whose private half never leaves the machine. Compromising the
+server does not yield any participant's signing key.
+
+\textbf{Enrollment is closed.} A public key is accepted only in exchange for a
+single-use code, so the population of legitimate endpoints is controlled and
+auditable.
+
+\textbf{Freshness defeats replay.} The per-connection random nonce ensures that
+recording a valid authentication exchange confers no ability to authenticate
+later.
+
+\textbf{The server cannot read the session.} DTLS-SRTP keys are negotiated
+directly between the peers. The server relays the SDP that begins that
+negotiation but never possesses the derived keys, so it is structurally unable
+to decrypt frames or control events. This is the property that distinguishes the
+design from relay-mediated commercial products.
+
+\textbf{Unattended acceptance is host-verified.} Automatic acceptance of an
+unattended session is conditioned on a password checked by the host itself, not
+by the server, so the server never sees the unattended secret either.
+
+\tabref{tab:threats} maps the principal threats to the mechanisms that address
+them.
+
+\begin{table}[H]
+\centering
+\caption{Threat model summary}
+\label{tab:threats}
+\small
+\begin{tabular}{@{}p{5.4cm}p{8cm}@{}}
+\toprule
+\textbf{Threat} & \textbf{Mitigation} \\
+\midrule
+Unauthorised host or controller joins & Closed enrollment via single-use codes; Ed25519 identity. \\
+Impersonation of an enrolled peer & Signature over a server-issued nonce, verified against the enrolled key. \\
+Replay of a captured handshake & Fresh random nonce per connection. \\
+Eavesdropping by the server or a relay & End-to-end DTLS-SRTP; keys never held by the server. \\
+Passive network eavesdropping & \texttt{wss://} for signaling; SRTP for media. \\
+Abuse of unattended acceptance & Host-verified unattended password. \\
+\bottomrule
+\end{tabular}
+\end{table}

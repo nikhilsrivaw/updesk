@@ -1,0 +1,157 @@
+\chapter{Literature Review}
+
+This chapter examines the protocols, products and enabling technologies that
+define the current state of remote desktop access, and closes by identifying the
+gap that \updesk{} occupies.
+
+\section{Remote Framebuffer and VNC}
+
+Virtual Network Computing, developed at the Olivetti Research Laboratory and
+standardised as the Remote Framebuffer protocol in RFC~6143, is the conceptual
+ancestor of most open remote desktop software. Its model is deliberately thin:
+the server exports a rectangular framebuffer, the client requests updates, and
+the server responds with rectangles that have changed, optionally encoded using
+schemes such as Hextile, ZRLE or Tight.
+
+The strength of this design is portability. Because the protocol reasons about
+pixels rather than drawing commands, a VNC server can be written for any system
+that can read its own screen. The corresponding weakness is efficiency. Video
+playback or window dragging invalidates large regions, and rectangle-oriented
+encodings degrade badly under such motion. RFB also assumes the client can open
+a TCP connection to the server, which on the modern Internet is usually false
+without manual port forwarding. Security was not part of the original design;
+encryption is provided, when at all, by tunnelling or by vendor extensions.
+
+\section{Microsoft Remote Desktop Protocol}
+
+RDP takes the opposite approach. Rather than shipping pixels, it intercepts
+drawing operations and transmits high-level primitives --- glyphs, blits,
+geometric fills --- which the client replays locally. For conventional desktop
+work this is dramatically more efficient than any framebuffer encoding, and
+successive revisions have added RemoteFX and H.264 codecs for content that does
+not decompose into primitives.
+
+RDP is mature, well integrated with Windows session management, and capable of
+reaching the login screen because it is part of the operating system rather than
+an application running inside a session. Its limitations for the present purpose
+are that it is tightly coupled to the Windows display architecture, that its
+implementation is closed, and that reaching an RDP host from outside a network
+requires either a routable address, a virtual private network, or a Remote
+Desktop Gateway. Exposing RDP directly to the Internet is widely documented as a
+significant risk and is a common initial vector for ransomware intrusion.
+
+\section{Commercial Peer-Assisted Products}
+
+TeamViewer, AnyDesk and similar commercial tools solved the reachability problem
+in the way users actually experience it: the host registers with vendor
+infrastructure and is addressed by a short numeric identifier, and the vendor
+arranges connectivity irrespective of NAT. AnyDesk's DeskRT codec, in
+particular, is specialised for graphical user interface content and achieves
+notably low latency.
+
+These products are highly capable, and their user experience informed the design
+of \updesk{}'s connect-identifier scheme. The architectural objection is one of
+trust rather than quality. Session traffic is arranged, and frequently relayed,
+by infrastructure the user neither controls nor can audit, and the identifier
+namespace itself is vendor-operated. Published incidents in which support
+sessions were abused illustrate that the concentration of capability is a real
+consideration and not merely a theoretical one.
+
+\section{RustDesk and the Open Alternative}
+
+RustDesk is an open-source remote desktop implementation written in Rust that
+mirrors the commercial user experience --- numeric identifiers, self-hostable
+relay and rendezvous servers --- while permitting inspection of the source. Its
+architecture separates a native capture library from a service component, which
+is precisely the structure required to reach privileged desktops on Windows.
+
+RustDesk is the closest prior work to this project and was studied carefully
+during design. \updesk{} differs in two respects that are relevant to the
+contribution claimed here. First, it uses standard WebRTC as its transport, so
+media encryption, congestion control and ICE behaviour are inherited from a
+widely reviewed implementation rather than from a bespoke protocol. Second, its
+signaling layer authenticates every endpoint with an Ed25519
+challenge--response, with enrollment gated by one-time codes, making device
+identity a first-class element of the protocol rather than a property of a
+shared password.
+
+\section{WebRTC as a Transport}
+
+WebRTC is a set of standards for real-time communication between peers,
+comprising media capture, a peer connection abstraction, and data channels. Its
+relevance here rests on three properties.
+
+\textbf{Connectivity.} Interactive Connectivity Establishment (RFC~8445) has
+each peer gather candidate transport addresses --- host addresses, server-
+reflexive addresses discovered through STUN, and relayed addresses obtained from
+TURN --- exchange them, and probe candidate pairs systematically until a
+working path is found. This resolves the NAT traversal problem that defeats VNC
+and RDP without operator configuration.
+
+\textbf{Security.} Media encryption is not optional. Peers perform a DTLS
+handshake and derive SRTP keys from it, so the payload is protected end to end.
+A signaling server that only relays session descriptions and candidates cannot
+recover those keys, which is exactly the property \updesk{} requires.
+
+\textbf{Adaptivity.} The stack includes congestion control, packet loss
+concealment and jitter buffering developed for conferencing traffic, which
+transfers directly to screen streaming.
+
+WebRTC deliberately does not specify signaling. Peers must exchange SDP offers,
+answers and ICE candidates over some out-of-band channel of the application's
+choosing, and the design of that channel is where an application's security
+model is largely decided.
+
+\section{Screen Capture on Windows}
+
+Three mechanisms are relevant. The \texttt{getDisplayMedia} API available to web
+content is simple and cross-platform, but the browser security model requires a
+user gesture and a source-selection dialogue, and content on the secure desktop
+is never visible to it. The Desktop Duplication API exposed through DXGI
+provides efficient access to the composited desktop surface with damage regions,
+and is the basis of most native Windows capture. The newer
+Windows.Graphics.Capture API offers per-window capture with a cleaner interface
+at the cost of requiring recent Windows versions.
+
+Critically, none of these can observe the Winlogon secure desktop from an
+ordinary user session. Windows isolates the login screen and UAC prompts on a
+separate desktop in a distinct session precisely to prevent one application from
+observing or driving another's credential entry. Reaching it requires a process
+running as SYSTEM that can attach to the active desktop --- which is why the
+architecture in Chapter~4 includes a service component.
+
+\section{Identified Gap}
+
+The survey suggests the following. Open protocols such as RFB and RDP are
+transparent but assume reachability that ordinary networks do not provide.
+Commercial products provide reachability but require trust in infrastructure
+that cannot be audited. RustDesk narrows the gap substantially but implements
+its own transport and its own security layer. There remains room for a system
+that (i) uses standard, widely reviewed WebRTC for transport and encryption,
+(ii) authenticates endpoints with public-key identity so that the signaling
+server can verify who is connecting without being able to read what is sent, and
+(iii) treats unattended, pre-login, secure-desktop-capable operation as a design
+requirement rather than an afterthought. \updesk{} is an attempt to occupy that
+position.
+
+\tabref{tab:comparison} summarises the comparison.
+
+\begin{table}[H]
+\centering
+\caption{Comparison of remote desktop approaches}
+\label{tab:comparison}
+\small
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+\textbf{System} & \textbf{Open} & \textbf{NAT} & \textbf{E2E} & \textbf{Pre-login} & \textbf{Transport} \\
+ & & \textbf{traversal} & \textbf{encrypted} & \textbf{access} & \\
+\midrule
+VNC (RFB)   & Yes & No      & Optional & No  & TCP \\
+RDP         & No  & Gateway & Yes      & Yes & TCP/UDP \\
+TeamViewer  & No  & Yes     & Claimed  & Yes & Proprietary \\
+AnyDesk     & No  & Yes     & Claimed  & Yes & Proprietary \\
+RustDesk    & Yes & Yes     & Yes      & Yes & Custom \\
+\textbf{UpDesk} & Yes & Yes & Yes      & Yes & WebRTC \\
+\bottomrule
+\end{tabular}
+\end{table}

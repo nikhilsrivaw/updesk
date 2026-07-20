@@ -1,0 +1,63 @@
+\chapter{Conclusion and Future Work}
+
+\section{Conclusion}
+
+This project set out to build a remote desktop system that provides the
+reachability users expect from commercial tools without asking them to trust an
+opaque relay, and that additionally supports genuine unattended operation. Both
+aims were met.
+
+The system pairs a lightweight Rust signaling server with direct, end-to-end
+encrypted WebRTC media. The server authenticates every endpoint with an Ed25519
+challenge--response over a closed, code-gated enrollment scheme, yet is
+structurally unable to decrypt the sessions it arranges because the DTLS-SRTP
+keys are negotiated only between the peers. This separation --- the server knows
+\emph{who} is connecting but never \emph{what} is sent --- is the core
+contribution and the property that distinguishes \updesk{} from relay-mediated
+products.
+
+The second contribution is a headless native host. By capturing the framebuffer
+directly rather than through a browser API, it operates with no window, no
+gesture and no picker; by encoding to H.264 and publishing on a native WebRTC
+track it reuses the same secure transport as the attended host; and by
+registering as a Windows service it is present from boot and can reach the active
+desktop. Native input injection makes it a full control host and not merely a
+viewer.
+
+Evaluation on both a local network and the public Internet confirmed direct
+peer-to-peer connectivity across the tested NAT configurations, interactive
+latency suitable for real use, and unattended service operation that survived
+reboot and session switching. A real defect in DTLS curve negotiation against
+modern browsers was diagnosed and repaired in a vendored patch --- a repair that
+was only possible because every layer of the stack was open to inspection.
+
+\section{Future Work}
+
+Several directions would extend the system.
+
+\begin{itemize}
+  \item \textbf{Complete secure-desktop capture.} The SYSTEM service provides the
+        foundation for capturing the Winlogon secure desktop; dedicated
+        implementation and testing of that path would let a controller drive UAC
+        prompts and the login screen, closing the last gap with RDP.
+  \item \textbf{Hardware-accelerated, low-latency encoding.} Replacing the
+        software H.264 path with a hardware encoder configured for low latency
+        would reduce wide-area delay and free CPU on the host.
+  \item \textbf{Audio and clipboard.} Forwarding host audio and synchronising the
+        clipboard are natural additions over the existing data channel, deferred
+        deliberately to keep the video and control paths correct first.
+  \item \textbf{File transfer.} A negotiated file-transfer channel would round out
+        the support use case.
+  \item \textbf{Multi-monitor support.} Extending capture beyond the primary
+        display, with monitor selection at the controller.
+  \item \textbf{Cross-platform hosts.} The native capture and input layers are the
+        platform-specific parts; Linux and macOS hosts would follow the same
+        architecture with different capture and injection back ends.
+  \item \textbf{Mature mobile clients.} The repository contains exploratory
+        Android host and controller work that could be developed into supported
+        clients.
+\end{itemize}
+
+Taken together, these would turn a system that already demonstrates the central
+security and unattended-operation ideas into a complete alternative to the
+proprietary tools it was conceived against.

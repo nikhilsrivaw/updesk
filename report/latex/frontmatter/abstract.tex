@@ -1,0 +1,47 @@
+\chapter*{Abstract}
+\addcontentsline{toc}{chapter}{Abstract}
+\thispagestyle{plain}
+
+Remote desktop access has become ordinary infrastructure for technical support,
+distributed teams and unattended server administration. The tools in common use,
+however, force an uncomfortable choice. Products such as TeamViewer and AnyDesk
+are convenient but proprietary, and every session is mediated by vendor
+infrastructure the user cannot inspect. Protocol-level alternatives such as VNC
+and Microsoft RDP are open or well-documented but assume direct network
+reachability, which is rarely available between two machines that both sit
+behind network address translation.
+
+This project presents \textbf{UpDesk}, a remote desktop system implemented
+predominantly in Rust that addresses both concerns at once. Media and control
+data travel over a direct WebRTC peer connection established between the
+controlling and controlled machines, so screen frames never pass through a
+central server in the common case. A small signaling server participates only
+during connection establishment: it authenticates each endpoint using an
+Ed25519 challenge--response handshake, relays session-description and ICE
+candidate messages, and then steps aside. Because the server never possesses the
+DTLS-SRTP keys negotiated by the peers, it cannot decrypt the stream it helped
+to arrange.
+
+The second contribution of the work is an \emph{unattended native host}. A
+conventional web-technology host is constrained by the browser security model:
+screen capture through \texttt{getDisplayMedia} demands a user gesture and a
+picker dialogue, and it cannot observe the Windows login screen or User Account
+Control prompts, which are rendered on an isolated secure desktop. UpDesk
+therefore adds a standalone Rust binary that captures the framebuffer directly,
+encodes it to H.264, publishes it on a native WebRTC track, and injects keyboard
+and pointer events back into the active desktop. Registered as a Windows
+service, this binary is available from boot and before any user has logged in.
+
+The system was evaluated on a two-machine local network and across the public
+Internet. Direct peer connectivity was achieved in the tested NAT
+configurations, end-to-end latency remained in the range appropriate for
+interactive use at 1080p, and the service-mode host survived reboot and session
+switching without operator intervention. The report documents the protocol
+design, the cryptographic reasoning behind it, the implementation of each
+subsystem, and the measurements obtained.
+
+\vspace{0.6cm}
+\noindent\textbf{Keywords:} Remote Desktop, WebRTC, Peer-to-Peer, NAT Traversal,
+Ed25519, Rust, Screen Capture, Windows Service, Tauri.
+
+\clearpage
