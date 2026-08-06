@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">UpDesk Host (Native)</string>
+    <string name="tagline">Unattended remote access — runs 24/7 in the background. A control room connects any time with the fixed ID + password below.</string>
+    <string name="go_online">Go online (run 24/7)</string>
+    <string name="your_id">Your ID</string>
+    <string name="pin">PIN</string>
+    <string name="new_pin">New PIN</string>
+    <string name="offline">offline</string>
+    <string name="enable_control">Enable remote control</string>
+    <string name="enable_files">Enable file access</string>
+    <string name="use_root">Use root input (custody)</string>
+    <string name="accessibility_desc">Lets an authorized UpDesk controller tap, swipe, and type on this device during a session.</string>
+</resources>

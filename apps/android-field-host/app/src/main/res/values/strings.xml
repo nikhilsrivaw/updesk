@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">UpDesk Field</string>
+    <string name="tagline">A live field bridge — streams this phone\'s camera, microphone, and location to your control room, 24/7. It keeps running in the background using the fixed ID + password below.</string>
+    <string name="go_online">Go online (run 24/7)</string>
+    <string name="new_pin">New PIN</string>
+    <string name="offline">offline</string>
+    <string name="switch_camera">Switch camera</string>
+    <string name="grant_permissions">Grant camera / mic / location</string>
+</resources>

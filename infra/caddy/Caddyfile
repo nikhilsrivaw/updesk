@@ -8,10 +8,10 @@
 # TLS_KEY) — Caddy terminates TLS and proxies to it:
 #   cargo run -p signaling-server            # ws://127.0.0.1:8080
 #
-# Then the apps use wss://updesk.example.com with a REAL cert, so remove the
+# Then the apps use wss://up-desk.online with a REAL cert, so remove the
 # `--ignore-certificate-errors-spki-list=...` pin from the apps' tauri.conf.json
 # (production builds don't need it).
 
-updesk.example.com {
+up-desk.online {
 	reverse_proxy 127.0.0.1:8080
 }

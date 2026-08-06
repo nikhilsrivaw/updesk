@@ -57,7 +57,7 @@ class MainActivity : AppCompatActivity(), SignalingClient.Listener {
         configView.visibility = View.GONE
         liveView.visibility = View.VISIBLE
         status.text = "connecting…"
-        signaling = SignalingClient("wss://updesk.duckdns.org", identity, this).also {
+        signaling = SignalingClient("wss://up-desk.online", identity, this).also {
             it.connect(partnerId, pin)
         }
     }
@@ -73,6 +73,13 @@ class MainActivity : AppCompatActivity(), SignalingClient.Listener {
     } }
 
     override fun onOffer(sessionId: String, sdp: String) { ui.post {
+        // Renegotiation (host ICE restart) on the current session — recover in
+        // place rather than tearing down the live client and its renderer.
+        if (rtc != null && sessionId == this.sessionId) {
+            addStatus("re-negotiating (recovering)…")
+            rtc?.renegotiate(sdp)
+            return@post
+        }
         this.sessionId = sessionId
         rtc = WebRtcClient(
             applicationContext, renderer,

@@ -1,4 +1,4 @@
-import { SignalingClient } from './signaling.js';
+import { SignalingClient, verifySig, keyFingerprint } from './signaling.js';
 import { ICE_SERVERS } from './rtcConfig.js';
 import { attachFileReceiver, sendFile } from './fileTransfer.js';
 
@@ -24,6 +24,8 @@ let currentPin = ''; // PIN a controller must supply to connect
 // controller with the password connects with no per-session Accept prompt.
 let unattendedStream = null;
 let unattendedSession = false; // is the current session an unattended one?
+let peerE2E = null;            // {fp, sig, pub} the controller signed
+let activeControllerId = null; // for TOFU identity-key pinning
 const getUnattendedPw = () => (localStorage.getItem('updesk-unattended-pw') || '');
 
 // A stable per-install device identity (auto-generated once, kept in localStorage).
@@ -36,7 +38,7 @@ function deviceIdentity() {
   }
   return id;
 }
-const genPin = () => String(Math.floor(1000 + Math.random() * 9000)); // 4 digits
+const genPin = () => String(Math.floor(100000 + Math.random() * 900000)); // 6 digits (harder to brute-force; pairs with server rate-limit)
 
 // Persist received files to disk via the native command.
 const saveDownload = (name, data) => invoke('save_download', { name, data });
@@ -49,19 +51,114 @@ const QUALITY = {
   saver:    { maxBitrate: 800_000,   maxFramerate: 12, scaleResolutionDownBy: 2 },
 };
 
+// Adaptive bitrate state. The controller's chosen profile sets the CEILING; the
+// adaptation loop only ever moves the live bitrate between a floor and that
+// ceiling based on measured loss/RTT — so a manual "saver" choice is still
+// honoured as the maximum.
+const ADAPT_FLOOR = 300_000;
+// Cap the ENCODED long edge. A 1440p/4K desktop sent full-res over a cellular
+// relay congests and makes keyframes huge (a lost keyframe = a long freeze).
+// Capping to ~1600px — like the native + Android hosts — keeps it smooth and lets
+// the stream recover fast. baseScale is the divisor computed from the real screen.
+const MAX_ENCODE_EDGE = 1600;
+// Start every session at a modest live bitrate and let the adaptive loop CLIMB if
+// the link is healthy — instead of blasting the 8 Mbps ceiling and overshooting
+// down (which is the "stutters every few seconds" symptom over cellular).
+const INITIAL_BITRATE = 2_500_000;
+let baseScale = 1;
+let qualityCeiling = 8_000_000;
+let adaptTimer = null;
+let lastLoss = null; // {lost, sent} snapshot for delta loss ratio
+
+// Divisor so the encoded long edge is at most MAX_ENCODE_EDGE (screen kept sharp
+// enough on a desktop viewer, but far lighter to encode + relay).
+function computeBaseScale(stream) {
+  baseScale = 1;
+  try {
+    const s = stream.getVideoTracks()[0]?.getSettings?.() || {};
+    const longEdge = Math.max(s.width || 0, s.height || 0);
+    if (longEdge > MAX_ENCODE_EDGE) baseScale = longEdge / MAX_ENCODE_EDGE;
+  } catch (_) {}
+}
+
 async function applyQuality(profile) {
   const q = QUALITY[profile];
   if (!q || !videoSender) return;
+  qualityCeiling = q.maxBitrate;
+  lastLoss = null;
   const params = videoSender.getParameters();
   if (!params.encodings || !params.encodings.length) params.encodings = [{}];
-  params.encodings[0].maxBitrate = q.maxBitrate;
+  // Start at a conservative live bitrate (adaptTick climbs toward the ceiling if
+  // the link is healthy) so a cellular/relay path isn't blasted on connect.
+  params.encodings[0].maxBitrate = Math.min(q.maxBitrate, INITIAL_BITRATE);
   params.encodings[0].maxFramerate = q.maxFramerate;
-  params.encodings[0].scaleResolutionDownBy = q.scaleResolutionDownBy;
+  // Cap resolution to MAX_ENCODE_EDGE (baseScale) on top of the profile's own
+  // downscale — the biggest single win for smoothness + fast recovery.
+  params.encodings[0].scaleResolutionDownBy = baseScale * q.scaleResolutionDownBy;
+  // Latency tuning: under CPU/network pressure, shed *resolution* not frame
+  // rate, so pointer movement and scrolling stay responsive instead of stuttery
+  // (a stutter reads as "lag" far more than a momentary softness). And mark the
+  // screen stream high priority so it wins bandwidth over data channels.
+  params.degradationPreference = 'maintain-framerate';
+  params.encodings[0].networkPriority = 'high';
+  params.encodings[0].priority = 'high';
   try {
     await videoSender.setParameters(params);
     log(`quality → ${profile}`);
   } catch (e) {
     log(`quality set failed: ${e}`);
+  }
+}
+
+// Adaptive bitrate — RustDesk-style congestion response, our own logic. Every
+// few seconds we read the receiver's loss + round-trip time from getStats and
+// nudge the encoder's max bitrate: back off hard when the link is hurting,
+// recover gently when it's healthy. Hysteresis (asymmetric step sizes +
+// requiring a clean sample to climb) keeps it from oscillating.
+function startAdaptive() {
+  stopAdaptive();
+  lastLoss = null;
+  adaptTimer = setInterval(adaptTick, 2500);
+}
+function stopAdaptive() {
+  clearInterval(adaptTimer);
+  adaptTimer = null;
+}
+async function adaptTick() {
+  if (!videoSender || !pc || pc.connectionState !== 'connected') return;
+  let outbound = null, remote = null;
+  try {
+    const stats = await pc.getStats();
+    stats.forEach((r) => {
+      if (r.type === 'outbound-rtp' && r.kind === 'video') outbound = r;
+      if (r.type === 'remote-inbound-rtp' && r.kind === 'video') remote = r;
+    });
+  } catch (_) { return; }
+  if (!remote) return;
+
+  const rttMs = remote.roundTripTime != null ? remote.roundTripTime * 1000 : null;
+  let loss = 0;
+  const lost = remote.packetsLost || 0;
+  const sent = outbound ? (outbound.packetsSent || 0) : 0;
+  if (lastLoss) {
+    const dLost = lost - lastLoss.lost;
+    const dSent = sent - lastLoss.sent;
+    if (dSent > 0) loss = Math.max(0, dLost) / dSent;
+  }
+  lastLoss = { lost, sent };
+
+  const params = videoSender.getParameters();
+  if (!params.encodings || !params.encodings.length) return;
+  const cur = params.encodings[0].maxBitrate || qualityCeiling;
+  let next = cur;
+  if (loss > 0.03 || (rttMs != null && rttMs > 300)) {
+    next = Math.max(ADAPT_FLOOR, Math.round(cur * 0.6));      // hurting → back off HARD
+  } else if (loss < 0.01 && (rttMs == null || rttMs < 180)) {
+    next = Math.min(qualityCeiling, Math.round(cur * 1.08));  // healthy → recover GENTLY
+  }
+  if (next !== cur) {
+    params.encodings[0].maxBitrate = next;
+    try { await videoSender.setParameters(params); } catch (_) {}
   }
 }
 
@@ -240,6 +337,13 @@ function start() {
   client.addEventListener('answer', async (e) => {
     if (pc) await pc.setRemoteDescription({ type: 'answer', sdp: e.detail.sdp });
     log('answer applied');
+    verifyE2E(activeControllerId);
+  });
+
+  // Controller's signed DTLS fingerprint for the end-to-end check.
+  client.addEventListener('e2e', (e) => {
+    peerE2E = { fp: (e.detail.fp || '').toUpperCase(), sig: e.detail.sig, pub: e.detail.pub };
+    verifyE2E(activeControllerId);
   });
 
   client.addEventListener('ice_candidate', async (e) => {
@@ -320,7 +424,43 @@ function captureScreen() {
 // Set up the peer connection from an already-captured screen stream. Shared by
 // the attended path (acceptAndShare) and the unattended path (auto-accept with
 // a matching unattended password, reusing a pre-armed stream).
-function startSharing(sessionId, controllerId, capturedStream, grantedPerms, unattended) {
+// ---- End-to-end verification ----
+// Pull the DTLS certificate fingerprint out of an SDP. WebRTC binds the media
+// encryption keys to this cert, so signing it with our long-term identity key
+// lets the peer confirm the encrypted channel really terminates at us — and not
+// at a relay/server that quietly rewrote the handshake to wiretap.
+function extractDtlsFp(sdp) {
+  const m = (sdp || '').match(/a=fingerprint:sha-256\s+([0-9A-Fa-f:]+)/i);
+  return m ? m[1].toUpperCase() : '';
+}
+
+// Verify once we hold both the peer's signed fingerprint and its actual SDP.
+async function verifyE2E(peerId) {
+  if (!peerE2E || !pc || !pc.remoteDescription) return; // need both halves
+  const sdpFp = extractDtlsFp(pc.remoteDescription.sdp);
+  const { fp, sig, pub } = peerE2E;
+  peerE2E = null; // consume
+  const matches = !!fp && fp === sdpFp;                 // signed fp == real fp
+  const signed = matches && (await verifySig(pub, fp, sig)); // by claimed identity
+  const pinKey = 'updesk-pin-' + (peerId || 'peer');
+  const pinned = localStorage.getItem(pinKey);
+  const keyOk = signed && (!pinned || pinned === pub);  // TOFU: unchanged identity
+  if (signed && !pinned) localStorage.setItem(pinKey, pub);
+  if (matches && signed && keyOk) {
+    const fpr = await keyFingerprint(pub);
+    setStatus('🔒 connection end-to-end verified');
+    log('E2E VERIFIED — controller key: ' + fpr);
+  } else {
+    const why = !matches ? 'media handshake was altered in transit'
+      : !signed ? 'identity signature invalid'
+      : 'controller identity key CHANGED since last time';
+    setStatus('⚠ NOT end-to-end verified — ' + why);
+    log('⚠ SECURITY WARNING: E2E verification FAILED — ' + why);
+  }
+}
+
+async function startSharing(sessionId, controllerId, capturedStream, grantedPerms, unattended) {
+  activeControllerId = controllerId;
   perms = grantedPerms;
   stream = capturedStream;
   unattendedSession = !!unattended;
@@ -335,9 +475,14 @@ function startSharing(sessionId, controllerId, capturedStream, grantedPerms, una
   log(`sharing ${nVideo} video + ${nAudio} audio track(s)`);
 
   pc = new RTCPeerConnection(ICE);
+  // Tell the encoder this is screen content: 'detail' keeps text/edges crisp
+  // when the frame is static, while degradationPreference (below) still favours
+  // frame rate when things move — the balance a remote desktop wants.
+  stream.getVideoTracks().forEach((t) => { try { t.contentHint = 'detail'; } catch (_) {} });
   stream.getTracks().forEach((t) => pc.addTrack(t, stream));
   videoSender = pc.getSenders().find((s) => s.track && s.track.kind === 'video');
-  applyQuality('high'); // sensible LAN default; controller can change it
+  computeBaseScale(stream);   // cap encoded resolution to the screen's real size
+  applyQuality('high'); // ceiling; live bitrate starts modest and climbs if healthy
 
   // controller -> host input — dropped entirely if input isn't granted.
   const input = pc.createDataChannel('input');
@@ -400,12 +545,58 @@ function startSharing(sessionId, controllerId, capturedStream, grantedPerms, una
   pc.onicecandidate = (e) => {
     if (e.candidate) client.signal('ice_candidate', sessionId, { candidate: e.candidate });
   };
-  pc.onconnectionstatechange = () => log(`pc: ${pc.connectionState}`);
+
+  // Mid-session recovery: if the P2P path drops (Wi-Fi flap, network switch,
+  // NAT rebinding) we renegotiate ICE in place instead of killing the session.
+  // The host is the offerer, so it drives the restart; the controller answers
+  // on its existing connection. A guard + cooldown prevents restart storms.
+  let iceRestarting = false;
+  let disconnectTimer = null;
+  const restartIce = async () => {
+    if (iceRestarting || !pc) return;
+    iceRestarting = true;
+    log('media link degraded — restarting ICE');
+    setStatus('reconnecting to controller…');
+    try {
+      const o = await pc.createOffer({ iceRestart: true });
+      await pc.setLocalDescription(o);
+      client.signal('offer', sessionId, { sdp: o.sdp });
+    } catch (err) {
+      log('ICE restart failed: ' + err);
+    }
+    setTimeout(() => { iceRestarting = false; }, 8000); // cooldown before another try
+  };
+  pc.onconnectionstatechange = () => {
+    log(`pc: ${pc.connectionState}`);
+    if (pc.connectionState === 'failed') {
+      restartIce();
+    } else if (pc.connectionState === 'connected') {
+      clearTimeout(disconnectTimer);
+      setStatus(unattended ? `unattended session with ${controllerId}` : `sharing screen with ${controllerId}`);
+      startAdaptive();
+    }
+  };
+  pc.oniceconnectionstatechange = () => {
+    const s = pc.iceConnectionState;
+    if (s === 'failed') {
+      restartIce();
+    } else if (s === 'disconnected') {
+      // 'disconnected' often self-heals within a few seconds — only restart if
+      // it's still broken after a short grace period.
+      clearTimeout(disconnectTimer);
+      disconnectTimer = setTimeout(() => {
+        if (pc && (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed')) restartIce();
+      }, 4000);
+    }
+  };
 
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
   client.signal('offer', sessionId, { sdp: offer.sdp });
   log('offer sent');
+  // Sign our DTLS fingerprint so the controller can confirm the channel is ours.
+  const ownFp = extractDtlsFp(pc.localDescription.sdp);
+  if (ownFp) client.signal('e2e', sessionId, { fp: ownFp, sig: await client.sign(ownFp), pub: client.getPublicKey() });
 }
 
 // Serve the remote file browser: handle list/get requests from the controller,
@@ -482,6 +673,9 @@ function stopSharing() {
 
 function teardown() {
   stopClipboardSync();
+  stopAdaptive();
+  peerE2E = null;
+  activeControllerId = null;
   if (invoke) invoke('annotate_hide').catch(() => {}); // close the overlay
   // Keep the armed unattended stream alive for the next unattended connection;
   // only stop a normal (attended) capture.

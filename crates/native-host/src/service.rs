@@ -22,7 +22,7 @@ use windows::Win32::Security::{
 use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
 use windows::Win32::System::Threading::{
-    CreateProcessAsUserW, TerminateProcess, WaitForSingleObject, CREATE_NEW_CONSOLE,
+    CreateProcessAsUserW, TerminateProcess, WaitForSingleObject, CREATE_NO_WINDOW,
     CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, STARTUPINFOW,
 };
 use windows_service::service::{
@@ -33,9 +33,9 @@ use windows_service::service_control_handler::{self, ServiceControlHandlerResult
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use windows_service::{define_windows_service, service_dispatcher};
 
-const SERVICE_NAME: &str = "UpDeskNativeHost";
-const DISPLAY_NAME: &str = "UpDesk Native Host";
-const HOST_EXE: &str = "native-host.exe";
+const SERVICE_NAME: &str = "UpDeskHostService";
+const DISPLAY_NAME: &str = "UpDesk Host Service";
+const HOST_EXE: &str = "updesk-host-service.exe";
 const NO_SESSION: u32 = 0xFFFF_FFFF;
 
 type BoxErr = Box<dyn Error>;
@@ -205,7 +205,7 @@ fn launch_in_session(session: u32) -> Option<Child> {
             None,
             None,
             false,
-            CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_CONSOLE,
+            CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
             if have_env { Some(env) } else { None },
             PCWSTR::null(),
             &si,

@@ -54,8 +54,33 @@ class InputAccessibilityService : AccessibilityService() {
             "move" -> if (dragging) continueDrag(px(e, "x", screenW), px(e, "y", screenH))
             "mouseup" -> endDrag(px(e, "x", screenW), px(e, "y", screenH))
             "wheel" -> wheel(e.optInt("dy"))
-            "keydown" -> typeKey(e.optString("key"))
+            "nav" -> globalAction(e.optString("action"))
+            "keydown" -> {
+                // Esc maps to Back so the PC keyboard can navigate out of screens
+                // even before the controller shows dedicated nav buttons.
+                if (e.optString("key") == "Escape") globalAction("back") else typeKey(e.optString("key"))
+            }
         }
+    }
+
+    /**
+     * System navigation via the accessibility framework — the same
+     * performGlobalAction() route RustDesk uses. Without this the controller can
+     * tap and type but can't press Back/Home/Recents, which makes driving a phone
+     * impossible. No root or device owner required.
+     */
+    private fun globalAction(action: String) {
+        val id = when (action) {
+            "back" -> GLOBAL_ACTION_BACK
+            "home" -> GLOBAL_ACTION_HOME
+            "recents" -> GLOBAL_ACTION_RECENTS
+            "notifications" -> GLOBAL_ACTION_NOTIFICATIONS
+            "quicksettings" -> GLOBAL_ACTION_QUICK_SETTINGS
+            "power" -> GLOBAL_ACTION_POWER_DIALOG
+            "lock" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) GLOBAL_ACTION_LOCK_SCREEN else return
+            else -> return
+        }
+        try { performGlobalAction(id) } catch (_: Throwable) {}
     }
 
     private fun px(e: JSONObject, k: String, span: Int) = (e.optDouble(k).toFloat()) * span

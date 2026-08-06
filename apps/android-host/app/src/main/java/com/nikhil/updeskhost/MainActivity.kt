@@ -56,15 +56,18 @@ class MainActivity : AppCompatActivity(), SignalingClient.Listener {
 
         identity = Identity.load(this)
 
-        // Android 13+ needs runtime notification permission for the foreground
-        // service's visible "screen is being shared" notification.
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-            if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
-                != android.content.pm.PackageManager.PERMISSION_GRANTED
-            ) {
-                requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)
-            }
-        }
+        // Runtime permissions: notifications (Android 13+) for the foreground
+        // service's visible notification, and microphone (optional) so audio can
+        // be streamed. Both are best-effort — the app works without either.
+        val wanted = mutableListOf<String>()
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+            != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) wanted.add(android.Manifest.permission.POST_NOTIFICATIONS)
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
+            != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) wanted.add(android.Manifest.permission.RECORD_AUDIO)
+        if (wanted.isNotEmpty()) requestPermissions(wanted.toTypedArray(), 1)
 
         findViewById<Button>(R.id.goOnlineBtn).setOnClickListener { goOnline() }
         findViewById<Button>(R.id.newPinBtn).setOnClickListener {
@@ -116,13 +119,19 @@ class MainActivity : AppCompatActivity(), SignalingClient.Listener {
             "Remote control: ON" else getString(R.string.enable_control)
         val fb = findViewById<Button>(R.id.enableFilesBtn)
         fb.text = if (filesGranted()) "File access: ON" else getString(R.string.enable_files)
+        // If the operator just enabled Accessibility mid-session, clear the
+        // VIEW-ONLY warning on return to the app.
+        if (rtc != null) {
+            val warn = if (inputReady()) "" else " — VIEW-ONLY (enable 'Remote control')"
+            setStatus("sharing screen$warn")
+        }
     }
 
     private fun goOnline() {
         currentPin = genPin()
         pinView.text = currentPin
         setStatus("connecting…")
-        signaling = SignalingClient("wss://updesk.duckdns.org", identity, this)
+        signaling = SignalingClient("wss://up-desk.online", identity, this)
         signaling.connect()
     }
 
@@ -130,9 +139,18 @@ class MainActivity : AppCompatActivity(), SignalingClient.Listener {
     // Block bodies (not `= ui.post {}`) so each returns Unit, not Handler.post's Boolean.
 
     override fun onReady() { ui.post {
-        setStatus("online — waiting for a connection")
+        // Warn up-front if remote input won't work, so the operator fixes it
+        // before a controller connects and finds taps do nothing.
+        val hint = if (inputReady()) "" else "  ⚠ enable 'Remote control' for input"
+        setStatus("online — waiting for a connection$hint")
         signaling.register()
     } }
+
+    // Can we actually inject the controller's input? Either the Accessibility
+    // service is enabled, or root routing is active. If neither, a session is
+    // view-only and the operator should know.
+    private fun inputReady() =
+        InputAccessibilityService.isEnabled || (RootInput.enabled && RootInput.available)
 
     override fun onRegistered(connectId: String) { ui.post {
         idView.text = connectId.replace(Regex("(\\d{3})(\\d{3})(\\d{3})"), "$1 $2 $3")
@@ -151,8 +169,12 @@ class MainActivity : AppCompatActivity(), SignalingClient.Listener {
         projectionLauncher.launch(mpm.createScreenCaptureIntent())
     } }
 
+    private fun micGranted(): Boolean =
+        checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+
     private fun beginShare(sessionId: String, projectionData: Intent) {
-        ScreenCaptureService.start(this)
+        ScreenCaptureService.start(this, micGranted())
         // The foreground service becomes active asynchronously; on Android 14 the
         // MediaProjection can't be used until it is. Give it a beat, then capture.
         ui.postDelayed({ startCapture(sessionId, projectionData) }, 700)
@@ -167,11 +189,20 @@ class MainActivity : AppCompatActivity(), SignalingClient.Listener {
                 onOfferReady = { sdp ->
                     signaling.respond(sessionId, true)  // accept
                     signaling.sendOffer(sessionId, sdp) // then the media offer
-                    ui.post { setStatus("sharing screen"); showChat(true) }
+                    // Sign our DTLS fingerprint so the controller can verify the
+                    // encrypted channel really terminates at this device (E2E).
+                    val fp = extractDtlsFp(sdp)
+                    if (fp.isNotEmpty()) {
+                        signaling.sendE2E(sessionId, fp, identity.sign(fp.toByteArray(Charsets.UTF_8)), identity.publicKeyB64)
+                    }
+                    ui.post {
+                        val warn = if (inputReady()) "" else " — VIEW-ONLY (enable 'Remote control')"
+                        setStatus("sharing screen$warn"); showChat(true)
+                    }
                 },
                 onChat = { text -> ui.post { addChatMessage(false, text) } },
             ).also { it.init() }
-            rtc!!.startSession(projectionData, metrics.widthPixels, metrics.heightPixels)
+            rtc!!.startSession(projectionData, metrics.widthPixels, metrics.heightPixels, micGranted())
         } catch (t: Throwable) {
             // Surface the failure instead of crashing the app.
             ScreenCaptureService.stop(this)
@@ -234,7 +265,13 @@ class MainActivity : AppCompatActivity(), SignalingClient.Listener {
     }
 
     private fun setStatus(s: String) { statusView.text = s }
-    private fun genPin() = (1000 + Random.nextInt(9000)).toString()
+    private fun genPin() = (100000 + Random.nextInt(900000)).toString() // 6 digits
+
+    // DTLS cert fingerprint from an SDP — WebRTC binds the media keys to it, so
+    // signing it proves the channel is ours (matches the desktop's regex).
+    private fun extractDtlsFp(sdp: String): String =
+        Regex("a=fingerprint:sha-256\\s+([0-9A-Fa-f:]+)", RegexOption.IGNORE_CASE)
+            .find(sdp)?.groupValues?.get(1)?.uppercase() ?: ""
 
     override fun onDestroy() {
         super.onDestroy()

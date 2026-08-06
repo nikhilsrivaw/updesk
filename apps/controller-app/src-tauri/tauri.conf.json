@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "controller-app",
+  "productName": "UpDesk Controller",
   "version": "0.1.0",
   "identifier": "com.nikhil.controller-app",
   "build": {
@@ -13,7 +13,7 @@
         "title": "UpDesk Controller",
         "width": 1100,
         "height": 720,
-        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --ignore-certificate-errors-spki-list=CDFj8Bx2PjooDMLBSJOorx8OXHi52I9PKfnF08wI76Y="
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding"
       }
     ],
     "security": {

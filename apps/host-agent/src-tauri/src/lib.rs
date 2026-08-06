@@ -290,30 +290,79 @@ fn vpn_status() -> Result<Value, String> {
     let mut adapters: Vec<String> = Vec::new();
     let mut processes: Vec<String> = Vec::new();
 
-    // 1. VPN virtual adapters (ipconfig /all descriptions). Skip the always-present
-    // WAN Miniports to avoid false positives.
-    if let Ok(out) = Command::new("ipconfig").arg("/all").creation_flags(CREATE_NO_WINDOW).output() {
-        for line in String::from_utf8_lossy(&out.stdout).lines() {
-            let low = line.to_lowercase();
-            let hit = ["wireguard", "openvpn", "tap-windows", "tap-nordvpn", " vpn", "tunnel", "wintun"]
-                .iter()
-                .any(|k| low.contains(k));
-            if hit && !low.contains("wan miniport") {
-                adapters.push(line.trim().to_string());
-            }
+    // 1. VPN virtual adapters. We inspect ONLY each adapter's "Description" field
+    // (the driver/hardware name) and match strong VPN signatures. Critically, we
+    // exclude Windows' built-in IPv6 transition pseudo-tunnels — Teredo, ISATAP,
+    // 6to4, IP-HTTPS — and WAN Miniports, which exist on ordinary machines and
+    // used to trip a bare "tunnel" keyword into a false "VPN detected".
+    let builtin = ["teredo", "isatap", "6to4", "wan miniport", "kernel debug", "ip-https", "microsoft tunnel"];
+    let vpn_adapter_kw = [
+        "wireguard", "wintun", "openvpn", "tap-windows", "tap-nordvpn", "nordlynx",
+        "protonvpn", "mullvad", "expressvpn", "surfshark", "cyberghost", "tunnelbear",
+        "windscribe", "private internet access", "zerotier", "tailscale", "sonicwall",
+        "cisco anyconnect", "anyconnect", "fortinet", "forticlient", "pulse secure",
+        "globalprotect", "checkpoint",
+    ];
+    // A VPN can be *installed* (adapter/driver present) but not *connected* (no
+    // tunnel up). We parse ipconfig per-adapter block so we can tell them apart:
+    // an adapter counts as connected only if it has an IPv4 address and isn't
+    // "media disconnected".
+    let mut connected = false;
+    fn flush(
+        desc: &Option<String>, has_ipv4: bool, media_off: bool,
+        builtin: &[&str], kw: &[&str], adapters: &mut Vec<String>, connected: &mut bool,
+    ) {
+        let d = match desc { Some(d) => d, None => return };
+        let dl = d.to_lowercase();
+        if dl.is_empty() || builtin.iter().any(|k| dl.contains(k)) { return; }
+        let hit = kw.iter().any(|k| dl.contains(k))
+            || dl.contains(" vpn ") || dl.starts_with("vpn ") || dl.ends_with(" vpn");
+        if hit {
+            adapters.push(d.clone());
+            if has_ipv4 && !media_off { *connected = true; }
         }
     }
+    if let Ok(out) = Command::new("ipconfig").arg("/all").creation_flags(CREATE_NO_WINDOW).output() {
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut desc: Option<String> = None;
+        let mut has_ipv4 = false;
+        let mut media_off = false;
+        for line in text.lines() {
+            // An adapter block starts with a non-indented header ending in ':'.
+            let is_header = !line.is_empty() && !line.starts_with(' ') && !line.starts_with('\t')
+                && line.trim_end().ends_with(':');
+            if is_header {
+                flush(&desc, has_ipv4, media_off, &builtin, &vpn_adapter_kw, &mut adapters, &mut connected);
+                desc = None; has_ipv4 = false; media_off = false;
+                continue;
+            }
+            let low = line.to_lowercase();
+            if low.contains("description") && line.contains(':') {
+                desc = Some(line.splitn(2, ':').nth(1).unwrap_or("").trim().to_string());
+            } else if low.contains("media state") && low.contains("disconnected") {
+                media_off = true;
+            } else if low.contains("ipv4 address") {
+                has_ipv4 = true;
+            }
+        }
+        flush(&desc, has_ipv4, media_off, &builtin, &vpn_adapter_kw, &mut adapters, &mut connected);
+    }
 
-    // 2. Running VPN clients.
+    // 2. Running VPN clients. Short tokens (e.g. "wg") must match the process
+    // stem exactly, so unrelated names that merely contain those letters don't
+    // register as a VPN.
     let vpn_procs = [
         "openvpn", "wireguard", "nordvpn", "expressvpn", "protonvpn", "surfshark",
-        "mullvad", "cyberghost", "tunnelbear", "windscribe", "pia", "hide.me", "wg",
+        "mullvad", "cyberghost", "tunnelbear", "windscribe", "hide.me", "forticlient",
+        "anyconnect", "globalprotect", "pulsesecure", "wg",
     ];
     if let Ok(out) = Command::new("tasklist").args(["/fo", "csv", "/nh"]).creation_flags(CREATE_NO_WINDOW).output() {
         for line in String::from_utf8_lossy(&out.stdout).lines() {
             let name = line.split("\",\"").next().unwrap_or("").trim_matches('"').to_string();
             let low = name.to_lowercase();
-            if vpn_procs.iter().any(|p| low.contains(p)) {
+            let stem = low.strip_suffix(".exe").unwrap_or(&low);
+            let hit = vpn_procs.iter().any(|p| if p.len() <= 3 { stem == *p } else { low.contains(p) });
+            if hit {
                 processes.push(name);
             }
         }
@@ -321,8 +370,16 @@ fn vpn_status() -> Result<Value, String> {
     processes.sort();
     processes.dedup();
 
-    let active = !adapters.is_empty() || !processes.is_empty();
-    Ok(json!({ "active": active, "adapters": adapters, "processes": processes }))
+    // "active"/present = VPN software exists on the machine; "connected" = a
+    // tunnel is actually up. The UI can then say "installed but not connected"
+    // instead of a misleading blanket "VPN detected".
+    let present = !adapters.is_empty() || !processes.is_empty();
+    Ok(json!({
+        "active": present,
+        "connected": connected,
+        "adapters": adapters,
+        "processes": processes
+    }))
 }
 
 // Read one chunk of a file as base64 (JS drives the chunking + streaming).

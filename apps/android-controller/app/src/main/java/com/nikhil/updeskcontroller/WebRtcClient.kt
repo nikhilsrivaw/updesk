@@ -40,8 +40,8 @@ class WebRtcClient(
         PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
         PeerConnection.IceServer.builder(
             listOf(
-                "turn:updesk.duckdns.org:3478?transport=udp",
-                "turn:updesk.duckdns.org:3478?transport=tcp",
+                "turn:up-desk.online:3478?transport=udp",
+                "turn:up-desk.online:3478?transport=tcp",
             )
         ).setUsername("updesk").setPassword("updesk_turn_9fKq2mXz7L").createIceServer(),
     )
@@ -99,13 +99,29 @@ class WebRtcClient(
             override fun onConnectionChange(newState: PeerConnection.PeerConnectionState?) {}
         }) ?: return
 
-        // Sequence properly: setRemoteDescription is async — only createAnswer
-        // once it has actually applied, or the video m-line isn't negotiated.
-        pc!!.setRemoteDescription(object : SdpObserver {
+        answerOffer(sdp)
+    }
+
+    /**
+     * Apply a renegotiation offer (e.g. the host restarting ICE mid-session) to
+     * the EXISTING connection, so a recovering session stays live instead of
+     * being torn down and rebuilt. Falls back to a fresh setup if we somehow
+     * have no connection yet.
+     */
+    fun renegotiate(sdp: String) {
+        if (pc == null) { onRemoteOffer(sdp); return }
+        answerOffer(sdp)
+    }
+
+    // Sequence properly: setRemoteDescription is async — only createAnswer once
+    // it has actually applied, or the video m-line isn't negotiated.
+    private fun answerOffer(sdp: String) {
+        val p = pc ?: return
+        p.setRemoteDescription(object : SdpObserver {
             override fun onSetSuccess() {
-                pc!!.createAnswer(object : SdpObserver {
+                p.createAnswer(object : SdpObserver {
                     override fun onCreateSuccess(desc: SessionDescription) {
-                        pc!!.setLocalDescription(EmptySdp(), desc)
+                        p.setLocalDescription(EmptySdp(), desc)
                         onAnswerReady(desc.description)
                     }
                     override fun onSetSuccess() {}

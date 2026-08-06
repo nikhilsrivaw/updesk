@@ -1,4 +1,4 @@
-import { SignalingClient } from './signaling.js';
+import { SignalingClient, verifySig, keyFingerprint } from './signaling.js';
 import { ICE_SERVERS } from './rtcConfig.js';
 import { attachFileReceiver, sendFile } from './fileTransfer.js';
 
@@ -38,6 +38,7 @@ let sessionId = null;
 let controlChannel = null; // clipboard + quality control channel
 let fileChannel = null; // file-transfer channel
 let inputChannel = null; // controller -> host input events
+let videoReceiver = null; // remote video receiver (jitter-buffer tuned per path)
 let clipTimer = null; // clipboard poll interval
 let lastClip = ''; // last clipboard text seen/applied (echo guard)
 let sessionPerms = { input: true, clipboard: true, file: true }; // host-granted
@@ -91,13 +92,25 @@ function sendChat() {
 // polite, not the security boundary.)
 function applyPerms(p) {
   sessionPerms = { input: !!p.input, clipboard: !!p.clipboard, file: !!p.file };
+  // A Field host (camera/mic/GPS bridge) gets the dedicated Field Monitor view.
+  if (p.device === 'field') { enterFieldView(); return; }
   if (!sessionPerms.clipboard) stopClipboardSync();
   if ($('sendFileBtn')) $('sendFileBtn').disabled = !sessionPerms.file;
+  // Phone Back/Home/Recents only make sense for an Android host that granted input.
+  const nav = $('navGroup');
+  if (nav) nav.hidden = !(p.os === 'android' && sessionPerms.input);
   const denied = [];
   if (!sessionPerms.input) denied.push('view-only');
   if (!sessionPerms.clipboard) denied.push('no clipboard');
   if (!sessionPerms.file) denied.push('no files');
   if (denied.length) setStatus(`connected — live (${denied.join(', ')})`);
+}
+
+// Send a system-navigation command to an Android host over the input channel.
+function sendNav(action) {
+  if (inputChannel && inputChannel.readyState === 'open') {
+    inputChannel.send(JSON.stringify({ kind: 'nav', action }));
+  }
 }
 
 // --- remote file browser (fs channel; e.g. an Android host's storage) ---
@@ -106,6 +119,39 @@ let fsIncoming = null; // { name, size, chunks: [] }
 let fsCurrentPath = '/storage/emulated/0';
 let examinerId = localStorage.getItem('updesk-examiner') || '';
 let currentPartnerId = '';
+let peerE2E = null; // {fp, sig, pub} the host signed
+
+// ---- End-to-end verification (mirror of the host side) ----
+function extractDtlsFp(sdp) {
+  const m = (sdp || '').match(/a=fingerprint:sha-256\s+([0-9A-Fa-f:]+)/i);
+  return m ? m[1].toUpperCase() : '';
+}
+// Confirm the host's DTLS fingerprint is signed by its identity key AND matches
+// the SDP we actually received — so a relay/server that rewrote the handshake to
+// wiretap is caught. TOFU-pins the host's identity key to catch later swaps.
+async function verifyE2E() {
+  if (!peerE2E || !pc || !pc.remoteDescription) return;
+  const sdpFp = extractDtlsFp(pc.remoteDescription.sdp);
+  const { fp, sig, pub } = peerE2E;
+  peerE2E = null;
+  const matches = !!fp && fp === sdpFp;
+  const signed = matches && (await verifySig(pub, fp, sig));
+  const pinKey = 'updesk-pin-' + (currentPartnerId || 'peer');
+  const pinned = localStorage.getItem(pinKey);
+  const keyOk = signed && (!pinned || pinned === pub);
+  if (signed && !pinned) localStorage.setItem(pinKey, pub);
+  if (matches && signed && keyOk) {
+    const fpr = await keyFingerprint(pub);
+    setStatus('🔒 connected — end-to-end verified');
+    log('E2E VERIFIED — host key: ' + fpr);
+  } else {
+    const why = !matches ? 'media handshake was altered in transit'
+      : !signed ? 'identity signature invalid'
+      : 'host identity key CHANGED since last time';
+    setStatus('⚠ NOT end-to-end verified — ' + why);
+    log('⚠ SECURITY WARNING: E2E verification FAILED — ' + why);
+  }
+}
 
 function setupFileBrowser(ch) {
   fsChannel = ch;
@@ -252,14 +298,244 @@ function renderVpn(d) {
   const el = $('netVpn');
   if (!el) return;
   el.hidden = false;
-  if (d.active) {
-    const detail = [...(d.processes || []), ...(d.adapters || [])].join(', ');
+  const detail = [...(d.processes || []), ...(d.adapters || [])].join(', ');
+  const suffix = (detail ? ' — ' + detail : '') + (d.server ? ' (server ' + d.server + ')' : '');
+  if (d.connected) {
+    // A tunnel is actually up — traffic is being masked right now.
     el.className = 'net-vpn on';
-    el.textContent = '🔒 VPN DETECTED' + (detail ? ' — ' + detail : '') + (d.server ? ' (server ' + d.server + ')' : '');
+    el.textContent = '🔒 VPN CONNECTED' + suffix;
+  } else if (d.active) {
+    // VPN software is installed/running but no tunnel is established.
+    el.className = 'net-vpn warn';
+    el.textContent = '⚠ VPN software present (not connected)' + suffix;
   } else {
     el.className = 'net-vpn off';
     el.textContent = '✓ No VPN detected';
   }
+}
+
+// ---- Field Monitor: a dedicated view for an UpDesk Field host (camera + mic +
+// GPS bridge) where live video, audio, and exact location are shown at once. ----
+let fieldMode = false;
+let lastLocation = null;
+
+// Leaflet map state (interactive live map with a breadcrumb route trail).
+let fmap = null, ftrail = null, fmarker = null, faccuracy = null;
+let trailPts = [];       // [[lat,lon], ...] the route so far
+let trailMeters = 0;     // cumulative distance travelled
+let followMode = true;   // keep the map centered on the device until the user pans
+
+// Great-circle distance between two [lat,lon] points, in metres (haversine).
+function haversine(a, b) {
+  const R = 6371000, toRad = (x) => (x * Math.PI) / 180;
+  const dLat = toRad(b[0] - a[0]), dLon = toRad(b[1] - a[1]);
+  const s = Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(a[0])) * Math.cos(toRad(b[0])) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+
+// Create the Leaflet map lazily, once the field view (and its container) is visible.
+function ensureFieldMap() {
+  if (fmap || !window.L || $('fieldView').hidden) return;
+  const L = window.L;
+  fmap = L.map('fieldMap', { zoomControl: true, attributionControl: true }).setView([20, 0], 2);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19, attribution: '© OpenStreetMap',
+  }).addTo(fmap);
+  faccuracy = L.circle([0, 0], { radius: 0, color: '#396cd8', weight: 1, fillColor: '#396cd8', fillOpacity: 0.12 }).addTo(fmap);
+  ftrail = L.polyline([], { color: '#6ea8fe', weight: 4, opacity: 0.9 }).addTo(fmap);
+  fmarker = L.circleMarker([0, 0], { radius: 7, color: '#fff', weight: 2, fillColor: '#396cd8', fillOpacity: 1 }).addTo(fmap);
+  // A manual pan drops follow-mode; the Center button turns it back on.
+  fmap.on('dragstart', () => { followMode = false; });
+  setTimeout(() => { if (fmap) fmap.invalidateSize(); }, 0);
+}
+
+// Plot one fix: extend the trail, move the marker/accuracy circle, follow if enabled.
+function updateFieldMap(d) {
+  ensureFieldMap();
+  if (!fmap) return;
+  const ll = [d.lat, d.lon];
+  if (trailPts.length) trailMeters += haversine(trailPts[trailPts.length - 1], ll);
+  trailPts.push(ll);
+  if (trailPts.length > 5000) trailPts.shift(); // cap memory on long shifts
+  ftrail.setLatLngs(trailPts);
+  fmarker.setLatLng(ll);
+  if (d.accuracy != null) { faccuracy.setLatLng(ll); faccuracy.setRadius(d.accuracy); }
+  if (followMode) {
+    if (fmap.getZoom() < 4) fmap.setView(ll, 16); else fmap.panTo(ll, { animate: true });
+  }
+  if ($('fieldMapEmpty')) $('fieldMapEmpty').hidden = true;
+}
+
+function fmtDistance(m) {
+  return m >= 1000 ? `${(m / 1000).toFixed(2)} km` : `${Math.round(m)} m`;
+}
+
+function destroyFieldMap() {
+  if (fmap) { fmap.remove(); fmap = null; }
+  ftrail = fmarker = faccuracy = null;
+  trailPts = []; trailMeters = 0; followMode = true;
+}
+
+// Switch the controller into the Field Monitor layout. Idempotent — triggered by
+// either the field device's perms announcement or its first location fix.
+function enterFieldView() {
+  if (fieldMode) return;
+  fieldMode = true;
+  log('entering Field Monitor (camera + audio + map + recording)');
+  // Move the single live <video> into the field layout (keeps playback/srcObject).
+  const wrap = $('fieldVideoWrap');
+  const video = $('screen');
+  if (wrap && video) { $('fieldNoVideo')?.remove(); wrap.appendChild(video); }
+  // Move the floating chat panel in too, so it still works here (start closed).
+  if ($('chat')) { $('fieldView').appendChild($('chat')); $('chat').hidden = true; }
+  $('live').hidden = true;
+  $('fieldView').hidden = false;
+  $('fieldStatus').textContent = '📡 Field Monitor — live';
+  ensureFieldMap();                                  // container is visible now
+  setTimeout(() => { if (fmap) fmap.invalidateSize(); }, 60); // settle layout
+  tryListen(); // start audio; if the browser blocks it, the Listen button covers it
+}
+
+// Restore the normal live layout (move nodes back) when the session ends.
+function exitFieldView() {
+  if (!fieldMode) return;
+  fieldMode = false;
+  audioRec.stop(); videoRec.stop(); // flush + save any in-progress recordings first
+  const live = $('live');
+  const video = $('screen');
+  if (live && video) live.insertBefore(video, $('fsPanel'));
+  if (live && $('chat')) live.appendChild($('chat'));
+  $('fieldView').hidden = true;
+  destroyFieldMap();
+  if ($('fieldMapEmpty')) $('fieldMapEmpty').hidden = false;
+}
+
+// Try to play the remote stream WITH sound. A field stream carries an audio track,
+// so the browser blocks unmuted autoplay until a user gesture — in that case we
+// fall back to MUTED playback so the video never freezes, and the Listen button
+// (a real click) unmutes it.
+function tryListen() {
+  const v = $('screen');
+  if (!v) return;
+  const btn = $('fieldListenBtn');
+  v.muted = false;
+  v.play().then(() => {
+    if (btn) { btn.textContent = '🔊 Listening'; btn.classList.add('active'); }
+  }).catch(() => {
+    v.muted = true;                 // keep the VIDEO playing even if audio is blocked
+    v.play().catch(() => {});
+    if (btn) { btn.textContent = '🔊 Tap to listen'; btn.classList.remove('active'); }
+  });
+}
+
+// ---- Media recording (save live audio / video as local evidence) ----
+// One generic recorder, instantiated per media type below. Each records the
+// chosen tracks off the live remote stream to a local file (via saveDownload)
+// and logs the file + its SHA-256 into the chain of custody.
+const setFieldStatus = (s) => { const el = $('fieldStatus'); if (el) el.textContent = s; };
+
+function newRecorder({ kind, btnId, idleLabel, icon, filePrefix, mimes, getTracks }) {
+  let rec = null, chunks = [], startTs = 0, timer = null;
+
+  function label() {
+    const btn = $(btnId); if (!btn) return;
+    if (!rec || rec.state === 'inactive') { btn.textContent = idleLabel; return; }
+    const s = Math.floor((Date.now() - startTs) / 1000);
+    btn.textContent = `■ Stop • ${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+  }
+
+  function start() {
+    const tracks = getTracks();
+    if (!tracks.length) { setFieldStatus(`no ${kind} to record yet`); return; }
+    if (typeof MediaRecorder === 'undefined') { setFieldStatus('recording not supported here'); return; }
+    const mime = mimes.find((m) => { try { return MediaRecorder.isTypeSupported(m); } catch (_) { return false; } }) || '';
+    try {
+      rec = mime ? new MediaRecorder(new MediaStream(tracks), { mimeType: mime }) : new MediaRecorder(new MediaStream(tracks));
+    } catch (e) { setFieldStatus(`${kind} recording failed: ${e}`); return; }
+    chunks = [];
+    rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+    rec.onstop = () => finalize().catch((e) => setFieldStatus(`${kind} save failed: ${e}`));
+    rec.start(1000); // flush in ~1s slices so a crash loses at most a second
+    startTs = Date.now();
+    $(btnId)?.classList.add('recording');
+    timer = setInterval(label, 500); label();
+  }
+
+  function stop() {
+    if (rec && rec.state !== 'inactive') rec.stop();
+    if (timer) { clearInterval(timer); timer = null; }
+  }
+
+  async function finalize() {
+    const btn = $(btnId); if (btn) { btn.classList.remove('recording'); btn.textContent = idleLabel; }
+    if (timer) { clearInterval(timer); timer = null; }
+    if (!chunks.length) return;
+    const type = chunks[0].type || (kind === 'video' ? 'video/webm' : 'audio/webm');
+    const ext = type.includes('ogg') ? 'ogg' : type.includes('mp4') ? 'mp4' : 'webm';
+    const blob = new Blob(chunks, { type });
+    chunks = [];
+    const durSec = Math.max(1, Math.round((Date.now() - startTs) / 1000));
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const idPart = (currentPartnerId || 'field').replace(/\s/g, '');
+    const name = `${filePrefix}-${idPart}-${stamp}.${ext}`;
+    const buf = await blob.arrayBuffer();
+    const b64 = arrayBufferToBase64(buf);
+    const sha256 = await sha256Hex(buf);
+    const path = await saveDownload(name, b64);
+    // Chain-of-custody: record the file + its integrity hash at capture time.
+    logCustody({ type: `${kind}-recording`, name, path, durationSec: durSec, bytes: buf.byteLength, sha256, verified: true });
+    setFieldStatus(`${icon} ${kind} saved → ${name}  (${durSec}s)`);
+  }
+
+  return { toggle: () => (rec && rec.state !== 'inactive' ? stop() : start()), stop };
+}
+
+// Audio only.
+const audioRec = newRecorder({
+  kind: 'audio', btnId: 'fieldRecBtn', idleLabel: '● Record audio', icon: '🎙', filePrefix: 'field-audio',
+  mimes: ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/webm'],
+  getTracks: () => { const s = $('screen') && $('screen').srcObject; return s ? s.getAudioTracks() : []; },
+});
+// Full A/V clip (camera + mic together).
+const videoRec = newRecorder({
+  kind: 'video', btnId: 'fieldVidBtn', idleLabel: '⬤ Record video', icon: '🎥', filePrefix: 'field-video',
+  mimes: ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4'],
+  getTracks: () => { const s = $('screen') && $('screen').srcObject; return s ? s.getTracks() : []; },
+});
+
+function arrayBufferToBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+async function sha256Hex(buf) {
+  const h = await crypto.subtle.digest('SHA-256', buf);
+  return [...new Uint8Array(h)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Live field-device location (from the UpDesk Field host's `location` channel).
+function renderLocation(d) {
+  if (typeof d.lat !== 'number' || typeof d.lon !== 'number') return;
+  lastLocation = d;
+  if (!fieldMode) enterFieldView(); // first fix confirms this is a field device
+  const set = (id, v) => { const el = $(id); if (el) el.textContent = v; };
+  set('fLocCoords', `${d.lat.toFixed(6)}, ${d.lon.toFixed(6)}`);
+  set('fLocAcc', d.accuracy != null ? `±${Math.round(d.accuracy)} m` : '—');
+  set('fLocSpeed', d.speed != null ? `${(d.speed * 3.6).toFixed(1)} km/h` : '—');
+  set('fLocHeading', d.bearing != null ? `${Math.round(d.bearing)}°` : '—');
+  set('fLocAlt', d.altitude != null ? `${Math.round(d.altitude)} m` : '—');
+  set('fLocProvider', d.provider || 'gps');
+  set('fLocTime', d.time ? new Date(d.time).toLocaleTimeString() : '—');
+  updateFieldMap(d); // extend the trail + move the live marker
+  set('fLocDistance', trailPts.length > 1 ? fmtDistance(trailMeters) : '—');
+  const maps = $('fLocMaps');
+  if (maps) maps.href = `https://www.google.com/maps?q=${d.lat},${d.lon}`;
 }
 
 function renderNetinfo(d) {
@@ -365,6 +641,9 @@ window.addEventListener('DOMContentLoaded', () => {
   renderRecents();
   $('connectBtn').addEventListener('click', start);
   $('chatSend').addEventListener('click', sendChat);
+  $('navBack').addEventListener('click', () => sendNav('back'));
+  $('navHome').addEventListener('click', () => sendNav('home'));
+  $('navRecents').addEventListener('click', () => sendNav('recents'));
   $('chatInput').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); sendChat(); }
   });
@@ -480,6 +759,41 @@ window.addEventListener('DOMContentLoaded', () => {
     if (v.muted || v.paused) { v.muted = false; v.play().catch(() => {}); }
     $('enableAudioBtn').hidden = true;
   });
+
+  // ---- Field Monitor controls ----
+  $('fieldListenBtn')?.addEventListener('click', tryListen);
+  $('fieldEndBtn')?.addEventListener('click', endSession);
+  $('fieldReconfigureBtn')?.addEventListener('click', reconfigure);
+  $('fieldChatToggle')?.addEventListener('click', () => {
+    const c = $('chat'); if (c) c.hidden = !c.hidden;
+  });
+  // Record live audio / full A/V clip to a local file (saved + hashed into the
+  // evidence log).
+  $('fieldRecBtn')?.addEventListener('click', () => audioRec.toggle());
+  $('fieldVidBtn')?.addEventListener('click', () => videoRec.toggle());
+  // Flip the field device's camera (front/back) — commanded from the controller.
+  $('fieldFlipBtn')?.addEventListener('click', () => {
+    if (controlChannel && controlChannel.readyState === 'open') {
+      controlChannel.send(JSON.stringify({ kind: 'switchCamera' }));
+    }
+  });
+  $('fieldQuality')?.addEventListener('change', (e) => {
+    if (controlChannel && controlChannel.readyState === 'open') {
+      controlChannel.send(JSON.stringify({ kind: 'quality', profile: e.target.value }));
+    }
+  });
+  // Recenter + resume follow-mode on the latest fix.
+  $('fieldCenterBtn')?.addEventListener('click', () => {
+    followMode = true;
+    if (fmap && trailPts.length) fmap.setView(trailPts[trailPts.length - 1], 16);
+  });
+  // Wipe the route trail (keeps the live marker).
+  $('fieldClearBtn')?.addEventListener('click', () => {
+    trailPts = trailPts.length ? [trailPts[trailPts.length - 1]] : [];
+    trailMeters = 0;
+    if (ftrail) ftrail.setLatLngs(trailPts);
+    const el = $('fLocDistance'); if (el) el.textContent = '—';
+  });
 });
 
 function endSession() {
@@ -521,23 +835,59 @@ function start() {
   });
 
   client.addEventListener('offer', async (e) => {
+    // Renegotiation (e.g. the host restarting ICE mid-session): apply it to the
+    // EXISTING connection so the live session recovers in place, rather than
+    // tearing everything down and rebuilding a fresh pc.
+    if (pc && e.detail.sessionId === sessionId) {
+      try {
+        await pc.setRemoteDescription({ type: 'offer', sdp: e.detail.sdp });
+        const ans = await pc.createAnswer();
+        await pc.setLocalDescription(ans);
+        client.signal('answer', sessionId, { sdp: ans.sdp });
+        log('re-answered host (ICE restart)');
+      } catch (err) { log('renegotiation failed: ' + err); }
+      return;
+    }
     sessionId = e.detail.sessionId;
     pc = new RTCPeerConnection(ICE);
 
     const gotKinds = new Set();
     pc.ontrack = (ev) => {
+      // Latency: WebRTC buffers incoming media to smooth jitter, but for an
+      // interactive remote desktop that buffer *is* the lag. Ask for the
+      // smallest playout delay the receiver supports. jitterBufferTarget is the
+      // current API; playoutDelayHint is the older one — set whichever exists.
+      try {
+        if (ev.track.kind === 'video') {
+          videoReceiver = ev.receiver; // link monitor tunes its buffer per path
+          if ('jitterBufferTarget' in ev.receiver) ev.receiver.jitterBufferTarget = 0;
+          if ('playoutDelayHint' in ev.receiver) ev.receiver.playoutDelayHint = 0;
+        }
+      } catch (_) {}
       const v = $('screen');
       v.srcObject = ev.streams[0];
       v.muted = false; // let host audio through (if shared)
-      v.play().catch(() => {});
+      // A stream WITH audio can't autoplay unmuted (no user gesture yet); if the
+      // browser blocks it, fall back to muted so the video still plays instead of
+      // freezing on the first frame. The Listen / video-click handlers unmute.
+      v.play().catch(() => { v.muted = true; v.play().catch(() => {}); });
       gotKinds.add(ev.track.kind);
       // Visible proof of what arrived: "connected — live (video+audio)".
       setStatus(`connected — live (${[...gotKinds].sort().join('+')})`);
       if (ev.track.kind === 'audio') $('enableAudioBtn').hidden = false;
       log(`remote ${ev.track.kind} track received`);
     };
-    // Host-created data channels: 'input' (we send input events) and 'control'
-    // (clipboard sync + quality requests).
+    // ---- Host types & their data channels (KEEP THIS DISTINCTION INTACT) ----
+    // The controller serves four host kinds; they are told apart ONLY by which
+    // data channels the host opens + its `perms.device` value. Do not collapse
+    // these — the UI (input vs Field Monitor) depends on it:
+    //   • Android screen host  → 'input','fs','control' ; perms.os='android'      → remote-control UI
+    //   • Desktop host (Tauri) → 'input','fs','control' ; perms.os='windows'/...  → remote-control UI
+    //   • Desktop NATIVE host  → 'input','control'      ; perms.os='windows'      → remote-control UI
+    //   • UpDesk FIELD host    → 'location','control'   ; perms.device='field'    → Field Monitor (map+A/V+record)
+    // Field is identified by the 'location' channel (primary, always present) AND
+    // perms.device==='field' (secondary). Screen hosts never open a 'location'
+    // channel; the Field host never opens an 'input' channel.
     pc.ondatachannel = (ev) => {
       const ch = ev.channel;
       log(`data channel open: ${ch.label}`);
@@ -570,6 +920,18 @@ function start() {
         $('sendFileBtn').disabled = false;
       } else if (ch.label === 'fs') {
         setupFileBrowser(ch);
+      } else if (ch.label === 'location') {
+        // The `location` channel is created ONLY by an UpDesk Field host, so its
+        // very presence identifies a field device — switch to the Field Monitor
+        // view immediately, without waiting for a perms message or a GPS lock
+        // (indoors / location-off, a fix may never arrive). This is the robust,
+        // primary signal that distinguishes Field from the screen hosts.
+        log('field host detected (location channel) → Field Monitor');
+        enterFieldView();
+        ch.onmessage = (m) => {
+          let d; try { d = JSON.parse(m.data); } catch (_) { return; }
+          if (d.kind === 'location') renderLocation(d);
+        };
       } else {
         inputChannel = ch;
         window.__inputChannel = ch;
@@ -579,13 +941,32 @@ function start() {
     pc.onicecandidate = (ev) => {
       if (ev.candidate) client.signal('ice_candidate', sessionId, { candidate: ev.candidate });
     };
-    pc.onconnectionstatechange = () => log(`pc: ${pc.connectionState}`);
+    pc.onconnectionstatechange = () => {
+      log(`pc: ${pc.connectionState}`);
+      const s = pc.connectionState;
+      if (s === 'failed' || s === 'disconnected') {
+        setStatus('connection interrupted — recovering…');
+      } else if (s === 'connected') {
+        setStatus('connected — live');
+        startLinkMonitor(pc);
+      }
+    };
 
     await pc.setRemoteDescription({ type: 'offer', sdp: e.detail.sdp });
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     client.signal('answer', sessionId, { sdp: answer.sdp });
     log('answer sent');
+    // Sign our DTLS fingerprint so the host can verify us too.
+    const ownFp = extractDtlsFp(pc.localDescription.sdp);
+    if (ownFp) client.signal('e2e', sessionId, { fp: ownFp, sig: await client.sign(ownFp), pub: client.getPublicKey() });
+    verifyE2E();
+  });
+
+  // Host's signed DTLS fingerprint for the end-to-end check.
+  client.addEventListener('e2e', (e) => {
+    peerE2E = { fp: (e.detail.fp || '').toUpperCase(), sig: e.detail.sig, pub: e.detail.pub };
+    verifyE2E();
   });
 
   client.addEventListener('ice_candidate', async (e) => {
@@ -621,6 +1002,7 @@ function start() {
 }
 
 function reconfigure() {
+  exitFieldView(); // move the video/chat back into #live before hiding it
   if (client) client.close();
   client = null;
   if (pc) { pc.close(); pc = null; }
@@ -631,14 +1013,97 @@ function reconfigure() {
   renderRecents();
 }
 
+// Live link readout: every 2s inspect the active ICE candidate pair and surface
+// whether we're on a DIRECT path or the TURN RELAY, plus round-trip time. Makes
+// latency measurable ("direct • 24 ms") and flags when a session fell back to
+// relay (the usual reason a connection feels slower).
+let linkTimer = null;
+let lastVidStats = null; // {t, bytes} for computing live video bitrate
+function startLinkMonitor(pc) {
+  clearInterval(linkTimer);
+  lastVidStats = null;
+  let last = '';
+  linkTimer = setInterval(async () => {
+    if (!pc || pc.connectionState !== 'connected') return;
+    try {
+      const stats = await pc.getStats();
+      let pair = null;
+      stats.forEach((r) => {
+        if (r.type !== 'candidate-pair' || r.state !== 'succeeded') return;
+        if (r.nominated || r.selected || !pair || (r.bytesReceived || 0) > (pair.bytesReceived || 0)) pair = r;
+      });
+      if (!pair) return;
+      let local = null, remote = null;
+      stats.forEach((r) => {
+        if (r.id === pair.localCandidateId) local = r;
+        if (r.id === pair.remoteCandidateId) remote = r;
+      });
+      const relayed = (local && local.candidateType === 'relay') || (remote && remote.candidateType === 'relay');
+      const rtt = pair.currentRoundTripTime != null ? Math.round(pair.currentRoundTripTime * 1000) : null;
+      // When relayed, show the transport to the TURN server. 'udp' = good/fast;
+      // 'tcp'/'tls' = the slow fallback (usually means the UDP relay port range
+      // isn't open on the server firewall) and explains a laggy nearby relay.
+      let path = relayed ? 'relay' : 'direct';
+      if (relayed) {
+        const rp = (local && local.relayProtocol) || (remote && remote.relayProtocol);
+        if (rp) path = `relay(${rp})`;
+      }
+      // Live video stats — codec, actual resolution, fps, and bitrate. This is
+      // ground truth: blurry = low res/bitrate; we can now SEE which.
+      let codec = '', vin = null;
+      stats.forEach((r) => { if (r.type === 'inbound-rtp' && r.kind === 'video') vin = r; });
+      if (vin && vin.codecId) {
+        const c = stats.get(vin.codecId);
+        if (c && c.mimeType) codec = c.mimeType.replace('video/', '');
+      }
+      let vidInfo = '';
+      if (vin) {
+        const w = vin.frameWidth, h = vin.frameHeight, fps = vin.framesPerSecond;
+        let kbps = null;
+        const now = performance.now();
+        if (lastVidStats && vin.bytesReceived != null) {
+          const dt = (now - lastVidStats.t) / 1000;
+          if (dt > 0) kbps = Math.round(((vin.bytesReceived - lastVidStats.bytes) * 8) / 1000 / dt);
+        }
+        lastVidStats = { t: now, bytes: vin.bytesReceived || 0 };
+        const parts = [];
+        if (w && h) parts.push(`${w}×${h}`);
+        if (fps != null) parts.push(`${Math.round(fps)}fps`);
+        if (kbps != null && kbps >= 0) parts.push(`${kbps} kbps`);
+        vidInfo = parts.length ? '  ▸ ' + parts.join(' · ') : '';
+      }
+      const label = `${path}${rtt != null ? ` • ${rtt} ms` : ''}${codec ? ` • ${codec}` : ''}${vidInfo}`;
+      if (label !== last) {
+        last = label;
+        log(`link: ${label}`);
+        // Direct/LAN: zero buffer for minimum latency. Relay (mobile/cross-net):
+        // a small buffer absorbs jitter so it feels smooth instead of stuttery.
+        if (videoReceiver) {
+          const ms = relayed ? 150 : 0;
+          try {
+            if ('jitterBufferTarget' in videoReceiver) videoReceiver.jitterBufferTarget = ms;
+            if ('playoutDelayHint' in videoReceiver) videoReceiver.playoutDelayHint = ms / 1000;
+          } catch (_) {}
+        }
+      }
+      const el = $('linkStat'); if (el) el.textContent = label;
+    } catch (_) {}
+  }, 2000);
+}
+
 function teardown() {
   stopClipboardSync();
+  clearInterval(linkTimer);
   clearInterval(netTimer);
+  exitFieldView();
+  peerE2E = null;
+  if ($('navGroup')) $('navGroup').hidden = true;
   if ($('netBtn')) $('netBtn').hidden = true;
   if ($('netPanel')) $('netPanel').hidden = true;
   controlChannel = null;
   fileChannel = null;
   inputChannel = null;
+  videoReceiver = null;
   lastClip = '';
   sessionPerms = { input: true, clipboard: true, file: true };
   drawMode = false;

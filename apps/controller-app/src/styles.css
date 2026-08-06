@@ -316,6 +316,7 @@ button.small.danger { background: #d9534f; }
   border-bottom: 1px solid #1c1f25;
 }
 .net-vpn.on { background: #3b1418; color: #f87171; }
+.net-vpn.warn { background: #3a2c10; color: #fbbf24; }
 .net-vpn.off { background: #12271a; color: #4ade80; }
 .net-info {
   padding: 7px 12px;
@@ -323,4 +324,107 @@ button.small.danger { background: #d9534f; }
   color: #9db2c9;
   border-bottom: 1px solid #1c1f25;
   font-family: ui-monospace, monospace;
+}
+
+/* ---- Field Monitor view (camera + mic + live location, all at once) ---- */
+#fieldView { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+#fieldBar {
+  padding: 8px 12px;
+  background: #0f1114;
+  border-bottom: 1px solid #2a2e35;
+  font-size: 13px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+button.small.active { background: #2f7d46; }
+
+#fieldGrid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  grid-template-rows: minmax(0, 1fr);   /* fill the viewport, don't grow to video size */
+  overflow: hidden;
+}
+#fieldVideoWrap { position: relative; background: #000; min-width: 0; min-height: 0; overflow: hidden; }
+#fieldVideoWrap #screen { width: 100%; height: 100%; object-fit: contain; display: block; }
+#fieldNoVideo {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: #6b727d; font-size: 13px;
+}
+
+#fieldSide {
+  display: flex;
+  flex-direction: column;
+  background: #0f1114;
+  border-left: 1px solid #2a2e35;
+  min-height: 0;
+  overflow: hidden;
+}
+#fieldMapWrap { position: relative; flex: 1 1 auto; min-height: 200px; background: #14161a; }
+#fieldMap { width: 100%; height: 100%; border: 0; display: block; }
+#fieldMapEmpty {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: #6b727d; font-size: 13px;
+}
+
+#fieldLocCard { flex: 0 0 auto; max-height: 55%; padding: 14px 16px; overflow-y: auto; }
+.floc-title {
+  font-size: 12px; font-weight: 700; color: #9db2c9;
+  letter-spacing: 0.04em; margin-bottom: 10px;
+}
+.floc-row {
+  display: flex; justify-content: space-between; align-items: baseline;
+  padding: 7px 0; border-bottom: 1px solid #1c1f25; gap: 12px;
+}
+.floc-k { color: #6b727d; font-size: 12px; }
+.floc-v { color: #e6e6e6; font-size: 13px; font-weight: 600; text-align: right; }
+.floc-v.mono { font-family: ui-monospace, monospace; }
+.floc-link {
+  display: inline-block; margin-top: 12px;
+  color: #6ea8fe; font-size: 12px; text-decoration: none; font-weight: 600;
+}
+.floc-link:hover { text-decoration: underline; }
+
+@media (max-width: 760px) {
+  #fieldGrid { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); }
+  #fieldSide { border-left: 0; border-top: 1px solid #2a2e35; }
+}
+
+/* Leaflet live map inside the Field Monitor */
+#fieldMap { position: absolute; inset: 0; background: #1a1d22; }
+#fieldMapControls { position: absolute; top: 8px; right: 8px; z-index: 500; display: flex; gap: 6px; }
+.map-btn {
+  padding: 4px 9px; font-size: 12px; font-weight: 600;
+  background: rgba(15, 17, 20, 0.85); color: #cdd6e2;
+  border: 1px solid #2a2e35; border-radius: 7px; cursor: pointer;
+  backdrop-filter: blur(2px);
+}
+.map-btn:hover { background: rgba(31, 38, 48, 0.95); }
+#fieldMapEmpty { z-index: 400; pointer-events: none; }
+.leaflet-container { background: #1a1d22; font: inherit; }
+.leaflet-control-attribution {
+  background: rgba(15, 17, 20, 0.8) !important;
+  color: #8a93a1 !important;
+}
+.leaflet-control-attribution a { color: #6ea8fe !important; }
+
+/* Recording button state (Field Monitor — audio or video) */
+.small.recording {
+  background: #d9534f;
+  color: #fff;
+  animation: recpulse 1.2s ease-in-out infinite;
+}
+@keyframes recpulse { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
+
+/* Connection path + latency badge in the top bar */
+.link-stat {
+  font-size: 12px; font-weight: 600; color: #9aa4b2;
+  padding: 2px 8px; border: 1px solid #2a2e35; border-radius: 999px;
+  white-space: nowrap;
 }

@@ -1,0 +1,9 @@
+-dontobfuscate
+-keep class org.webrtc.** { *; }
+-keepclassmembers class org.webrtc.** { *; }
+-dontwarn okhttp3.**
+-dontwarn okio.**
+-keep class okhttp3.** { *; }
+-keep class okio.** { *; }
+-dontwarn org.bouncycastle.**
+-keep class org.bouncycastle.** { *; }

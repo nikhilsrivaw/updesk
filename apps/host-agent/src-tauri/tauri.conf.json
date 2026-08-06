@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "host-agent",
+  "productName": "UpDesk Host",
   "version": "0.1.0",
   "identifier": "com.nikhil.host-agent",
   "build": {
@@ -13,7 +13,7 @@
         "title": "UpDesk Host",
         "width": 520,
         "height": 680,
-        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --ignore-certificate-errors-spki-list=CDFj8Bx2PjooDMLBSJOorx8OXHi52I9PKfnF08wI76Y="
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding"
       }
     ],
     "security": {

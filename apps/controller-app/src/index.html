@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>UpDesk Controller</title>
+    <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -20,7 +21,7 @@
         <label>Examiner (for chain of custody)
           <input id="examiner" placeholder="your name / badge ID" />
         </label>
-        <input id="server" type="hidden" value="wss://updesk.duckdns.org" />
+        <input id="server" type="hidden" value="wss://up-desk.online" />
         <button id="connectBtn">Connect</button>
         <div id="recents" class="recents" hidden></div>
       </section>
@@ -28,6 +29,7 @@
       <section id="live" hidden>
         <div id="bar">
           <span id="status">connecting…</span>
+          <span id="linkStat" class="link-stat" title="Connection path & round-trip latency"></span>
           <span class="bar-actions">
             <label class="quality-label">Quality
               <select id="quality" disabled>
@@ -44,6 +46,12 @@
             <button id="drawToggle" class="small" hidden>Draw</button>
             <button id="drawClear" class="small" hidden>Clear</button>
             <button id="chatToggle" class="small">Chat</button>
+            <!-- Phone navigation (Android hosts) -->
+            <span id="navGroup" hidden>
+              <button id="navBack" class="small" title="Back">◁ Back</button>
+              <button id="navHome" class="small" title="Home">◯ Home</button>
+              <button id="navRecents" class="small" title="Recent apps">▢ Recents</button>
+            </span>
             <button id="endBtn" class="small danger">End session</button>
             <button id="reconfigureBtn" class="small">Reconfigure</button>
           </span>
@@ -97,7 +105,62 @@
           </div>
         </div>
       </section>
+
+      <!-- Dedicated Field Monitor view: live camera + audio + location at once.
+           The controller switches into this automatically when the connected
+           host is an UpDesk Field device (camera/mic/GPS bridge). -->
+      <section id="fieldView" hidden>
+        <div id="fieldBar">
+          <span id="fieldStatus">📡 Field Monitor — connecting…</span>
+          <span class="bar-actions">
+            <button id="fieldListenBtn" class="small">🔊 Listen</button>
+            <button id="fieldRecBtn" class="small">● Record audio</button>
+            <button id="fieldVidBtn" class="small">⬤ Record video</button>
+            <button id="fieldFlipBtn" class="small">🔄 Flip camera</button>
+            <label class="quality-label">Quality
+              <select id="fieldQuality">
+                <option value="high">High</option>
+                <option value="balanced" selected>Balanced</option>
+                <option value="saver">Data saver</option>
+              </select>
+            </label>
+            <button id="fieldChatToggle" class="small">Chat</button>
+            <button id="fieldEndBtn" class="small danger">End session</button>
+            <button id="fieldReconfigureBtn" class="small">Reconfigure</button>
+          </span>
+        </div>
+        <div id="fieldGrid">
+          <div id="fieldVideoWrap">
+            <!-- the live #screen <video> is moved in here while in field mode -->
+            <div id="fieldNoVideo">Waiting for camera…</div>
+          </div>
+          <aside id="fieldSide">
+            <div id="fieldMapWrap">
+              <div id="fieldMap"></div>
+              <div id="fieldMapControls">
+                <button id="fieldCenterBtn" class="map-btn" title="Recenter and follow">◎ Center</button>
+                <button id="fieldClearBtn" class="map-btn" title="Clear the route trail">✕ Trail</button>
+              </div>
+              <div id="fieldMapEmpty">Waiting for GPS fix…</div>
+            </div>
+            <div id="fieldLocCard">
+              <div class="floc-title">📍 Live location</div>
+              <div class="floc-row"><span class="floc-k">Coordinates</span><span id="fLocCoords" class="floc-v mono">—</span></div>
+              <div class="floc-row"><span class="floc-k">Accuracy</span><span id="fLocAcc" class="floc-v">—</span></div>
+              <div class="floc-row"><span class="floc-k">Speed</span><span id="fLocSpeed" class="floc-v">—</span></div>
+              <div class="floc-row"><span class="floc-k">Heading</span><span id="fLocHeading" class="floc-v">—</span></div>
+              <div class="floc-row"><span class="floc-k">Altitude</span><span id="fLocAlt" class="floc-v">—</span></div>
+              <div class="floc-row"><span class="floc-k">Distance</span><span id="fLocDistance" class="floc-v">—</span></div>
+              <div class="floc-row"><span class="floc-k">Source</span><span id="fLocProvider" class="floc-v">—</span></div>
+              <div class="floc-row"><span class="floc-k">Updated</span><span id="fLocTime" class="floc-v">—</span></div>
+              <a id="fLocMaps" class="floc-link" href="#" target="_blank" rel="noopener">Open in Google Maps ↗</a>
+            </div>
+          </aside>
+        </div>
+      </section>
     </main>
+    <!-- Leaflet (vendored locally — no CDN at runtime) for the live field map. -->
+    <script src="vendor/leaflet/leaflet.js"></script>
     <script type="module" src="controller.js"></script>
   </body>
 </html>

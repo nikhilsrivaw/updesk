@@ -59,6 +59,34 @@ async function signNonce(privateKey, nonce) {
   return bufToB64(await crypto.subtle.sign({ name: 'Ed25519' }, privateKey, new TextEncoder().encode(nonce)));
 }
 
+function b64ToBuf(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
+
+// Verify an Ed25519 signature (base64) over `message` using a base64 SPKI public
+// key. Used to bind a peer's DTLS fingerprint to its long-term identity, so a
+// relay/server that rewrites the media handshake is detected.
+export async function verifySig(publicKeyB64, message, sigB64) {
+  try {
+    const pub = await crypto.subtle.importKey('spki', b64ToBuf(publicKeyB64), { name: 'Ed25519' }, false, ['verify']);
+    return await crypto.subtle.verify({ name: 'Ed25519' }, pub, b64ToBuf(sigB64), new TextEncoder().encode(message));
+  } catch (_) { return false; }
+}
+
+// A human-verifiable fingerprint of an identity public key: SHA-256, first 16
+// bytes (128-bit) as grouped hex. 128 bits is birthday-resistant, so it's safe
+// for operators to read out-of-band to confirm no man-in-the-middle.
+export async function keyFingerprint(publicKeyB64) {
+  try {
+    const buf = await crypto.subtle.digest('SHA-256', b64ToBuf(publicKeyB64));
+    const hex = Array.from(new Uint8Array(buf).slice(0, 16)).map((x) => x.toString(16).padStart(2, '0').toUpperCase());
+    return hex.join('').replace(/(.{4})(?=.)/g, '$1 ');
+  } catch (_) { return ''; }
+}
+
 // Default to wss, and upgrade ws://<remote> to wss:// (webviews block insecure
 // ws to non-localhost anyway — the #1 source of confusing failures).
 export function normalizeUrl(url) {
@@ -90,7 +118,17 @@ export class SignalingClient extends EventTarget {
     this.openedThisAttempt = false;
     this.reconnectAttempt = 0;
     this._reconnectTimer = null;
+    // Keepalive / zombie detection (see _startHeartbeat).
+    this._heartbeatTimer = null;
+    this._watchdogTimer = null;
+    this._lastActivity = 0;
+    this._netListenersAttached = false;
   }
+
+  // Tunables for the liveness layer.
+  static get HEARTBEAT_MS() { return 20000; } // app-ping cadence
+  static get WATCHDOG_MS() { return 5000; }   // how often we check for silence
+  static get IDLE_LIMIT_MS() { return 40000; } // silence that means "dead link"
 
   _emit(type, detail) {
     this.dispatchEvent(new CustomEvent(type, { detail }));
@@ -98,12 +136,20 @@ export class SignalingClient extends EventTarget {
 
   async connect() {
     this.deliberateClose = false;
+    this._attachNetListeners();
     if (!this.key) this.key = await loadOrCreateKey(this.identityId);
     this._open();
   }
 
   _open() {
+    // Detach any previous socket so its late 'close' can't double-trigger the
+    // reconnect/heartbeat machinery while we dial a fresh one.
+    if (this.ws) {
+      this.ws.onopen = this.ws.onmessage = this.ws.onerror = this.ws.onclose = null;
+      try { this.ws.close(); } catch (_) {}
+    }
     this.openedThisAttempt = false;
+    this._lastActivity = Date.now();
     let ws;
     try {
       ws = new WebSocket(this.url);
@@ -132,6 +178,7 @@ export class SignalingClient extends EventTarget {
   }
 
   _onClose() {
+    this._stopHeartbeat();
     if (this.deliberateClose) {
       this._emit('disconnected', { reason: 'closed' });
       return;
@@ -153,21 +200,81 @@ export class SignalingClient extends EventTarget {
 
   _scheduleReconnect() {
     this.reconnectAttempt++;
-    const delayMs = Math.min(1000 * 2 ** (this.reconnectAttempt - 1), 15000);
+    // Exponential backoff capped at 15s, with 50-100% jitter so many clients
+    // recovering from the same outage don't stampede the server in lockstep.
+    const base = Math.min(1000 * 2 ** (this.reconnectAttempt - 1), 15000);
+    const delayMs = Math.round(base * (0.5 + Math.random() * 0.5));
     this._emit('reconnecting', { attempt: this.reconnectAttempt, delayMs });
     clearTimeout(this._reconnectTimer);
     this._reconnectTimer = setTimeout(() => this._open(), delayMs);
   }
 
+  // ---- liveness: keepalive heartbeat + zombie watchdog + wake/online reconnect ----
+
+  // A silently-dropped socket (NAT/router idle timeout, laptop sleep, Wi-Fi
+  // flap) often never fires 'close'. We ping the server on a cadence and, if
+  // *nothing* comes back for IDLE_LIMIT_MS, treat the link as dead and redial —
+  // rather than sitting "online" on a connection that can't carry traffic.
+  _startHeartbeat() {
+    this._stopHeartbeat();
+    this._lastActivity = Date.now();
+    this._heartbeatTimer = setInterval(() => {
+      this._send({ type: 'ping' });
+    }, SignalingClient.HEARTBEAT_MS);
+    this._watchdogTimer = setInterval(() => {
+      if (Date.now() - this._lastActivity > SignalingClient.IDLE_LIMIT_MS) {
+        this._stopHeartbeat();
+        this._emit('disconnected', { reason: 'timeout' });
+        this._open(); // dial fresh; auth_ok will restart the heartbeat
+      }
+    }, SignalingClient.WATCHDOG_MS);
+  }
+
+  _stopHeartbeat() {
+    clearInterval(this._heartbeatTimer); this._heartbeatTimer = null;
+    clearInterval(this._watchdogTimer); this._watchdogTimer = null;
+  }
+
+  _attachNetListeners() {
+    if (this._netListenersAttached) return;
+    this._netListenersAttached = true;
+    if (typeof window !== 'undefined' && window.addEventListener) {
+      window.addEventListener('online', () => this._wake());
+    }
+    if (typeof document !== 'undefined' && document.addEventListener) {
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') this._wake();
+      });
+    }
+  }
+
+  // Network came back or the app was refocused/woke from sleep — the moments a
+  // stale socket is most likely dead. Confirm with a ping if we look open;
+  // otherwise reconnect immediately instead of waiting out the backoff.
+  _wake() {
+    if (this.deliberateClose) return;
+    const rs = this.ws ? this.ws.readyState : WebSocket.CLOSED;
+    if (rs === WebSocket.OPEN) { this._send({ type: 'ping' }); return; }
+    if (rs === WebSocket.CONNECTING) return; // a dial is already in flight
+    this.reconnectAttempt = 0;
+    clearTimeout(this._reconnectTimer);
+    this._open();
+  }
+
   async _onMessage(raw) {
+    // Any frame is proof of life — keep the watchdog satisfied.
+    this._lastActivity = Date.now();
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
     switch (msg.type) {
+      case 'pong':
+        return; // keepalive ack; activity already recorded above
       case 'auth_challenge':
         this._send({ type: 'auth_response', signature: await signNonce(this.key.privateKey, msg.nonce) });
         break;
       case 'auth_ok':
         this.reconnectAttempt = 0;
+        this._startHeartbeat();
         if (this.everReady) this._emit('reconnected', msg);
         this.everReady = true;
         this._emit('ready', msg);
@@ -197,8 +304,17 @@ export class SignalingClient extends EventTarget {
   signal(type, sessionId, payload = {}) { this._send({ type, sessionId, ...payload }); }
   end(sessionId) { this._send({ type: 'end_session', sessionId }); }
 
+  // E2E verification layer: expose the identity public key and an Ed25519 signer
+  // so peers can sign their DTLS fingerprint and verify each other's.
+  getPublicKey() { return this.key ? this.key.publicKeyB64 : ''; }
+  async sign(message) {
+    if (!this.key) return '';
+    return bufToB64(await crypto.subtle.sign({ name: 'Ed25519' }, this.key.privateKey, new TextEncoder().encode(message)));
+  }
+
   close() {
     this.deliberateClose = true;
+    this._stopHeartbeat();
     clearTimeout(this._reconnectTimer);
     if (this.ws) this.ws.close();
   }

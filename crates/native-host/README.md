@@ -13,7 +13,7 @@ with those and immediately sees + controls the screen — no prompt on the host.
 
 Config (env):
 - `UPDESK_PW` — unattended password (default `updesk`)
-- `UPDESK_URL` — signaling server (default `wss://updesk.duckdns.org`)
+- `UPDESK_URL` — signaling server (default `wss://up-desk.online`)
 
 ## Run it unattended from boot (Windows service)
 Run an **elevated** prompt:

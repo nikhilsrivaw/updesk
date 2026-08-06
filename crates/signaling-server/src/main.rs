@@ -20,6 +20,10 @@ use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 
 const CHALLENGE_TTL: Duration = Duration::from_secs(30);
+// PIN brute-force guard: at most this many failed PIN attempts per device inside
+// the rolling window before dialing that device is throttled.
+const PIN_MAX_FAILS: u32 = 5;
+const PIN_FAIL_WINDOW_MS: u128 = 60_000;
 
 // ---------- shared state ----------
 
@@ -51,6 +55,8 @@ struct AppState {
     device_numeric: Mutex<HashMap<String, String>>, // 9-digit connect ID -> deviceId (online only)
     sessions: Mutex<HashMap<String, Session>>,
     peers: Mutex<HashMap<String, UnboundedSender<Message>>>, // identityId -> writer
+    // Brute-force guard: deviceId -> (recent PIN-failure count, window start ms).
+    fail_gate: Mutex<HashMap<String, (u32, u128)>>,
     db: Option<sqlx::PgPool>, // durable persistence + audit, when DATABASE_URL is set
 }
 
@@ -314,11 +320,34 @@ where
     });
 
     let mut conn = ConnState::default();
-    while let Some(msg) = incoming.next().await {
-        match msg {
-            Ok(Message::Text(t)) => handle_text(&state, &mut conn, &tx, &t),
-            Ok(Message::Close(_)) | Err(_) => break,
-            _ => {}
+
+    // Keepalive: ping every 25s so idle NAT/router/carrier timeouts (often 30-60s)
+    // never silently drop the socket, and reap any peer that goes quiet for >70s
+    // (a browser auto-answers our Ping frames, so a healthy client always stays
+    // well inside that window). Without this an idle connection becomes a zombie:
+    // the app still shows "online" but nothing can reach it.
+    const PING_EVERY: Duration = Duration::from_secs(25);
+    const IDLE_LIMIT: Duration = Duration::from_secs(70);
+    let mut ping = tokio::time::interval(PING_EVERY);
+    ping.tick().await; // consume the immediate first tick
+
+    loop {
+        tokio::select! {
+            _ = ping.tick() => {
+                if tx.send(Message::Ping(Vec::new())).is_err() { break; }
+            }
+            framed = tokio::time::timeout(IDLE_LIMIT, incoming.next()) => {
+                match framed {
+                    Err(_) => break,                                   // idle too long -> zombie
+                    Ok(None) => break,                                 // stream ended
+                    Ok(Some(Ok(Message::Text(t)))) => handle_text(&state, &mut conn, &tx, &t),
+                    Ok(Some(Ok(Message::Ping(p)))) => { let _ = tx.send(Message::Pong(p)); }
+                    Ok(Some(Ok(Message::Pong(_)))) => {}               // liveness proof; loop resets timeout
+                    Ok(Some(Ok(Message::Close(_)))) => break,
+                    Ok(Some(Ok(_))) => {}
+                    Ok(Some(Err(_))) => break,
+                }
+            }
         }
     }
 
@@ -476,6 +505,13 @@ fn handle_text(state: &Arc<AppState>, conn: &mut ConnState, tx: &UnboundedSender
     };
     let mtype = msg.get("type").and_then(Value::as_str).unwrap_or("");
 
+    // --- keepalive: app-level ping answered immediately, no auth required.
+    // Lets a client prove the *server* (not just the socket) is still alive and
+    // reset its own watchdog. Cheap, and safe to accept pre-auth.
+    if mtype == "ping" {
+        return send_json(tx, json!({ "type": "pong" }));
+    }
+
     // --- auth handshake (only messages allowed pre-auth) ---
     if mtype == "auth_init" {
         match start_handshake(state, conn, &msg) {
@@ -561,6 +597,22 @@ fn handle_text(state: &Arc<AppState>, conn: &mut ConnState, tx: &UnboundedSender
             if !online {
                 return send_json(tx, json!({ "type": "error", "message": "Device offline or not found" }));
             }
+            // Brute-force guard: a 4-digit PIN is small and wrong PINs are
+            // auto-rejected, so throttle dialing a device that has recently
+            // failed several PIN checks. (Legit use never hits 5 fails/minute.)
+            {
+                let mut gate = state.fail_gate.lock().unwrap();
+                match gate.get(&target).copied() {
+                    Some((count, start)) if now_ms().saturating_sub(start) < PIN_FAIL_WINDOW_MS => {
+                        if count >= PIN_MAX_FAILS {
+                            return send_json(tx, json!({ "type": "error",
+                                "message": "Too many failed PIN attempts for this machine — wait a minute and try again." }));
+                        }
+                    }
+                    Some(_) => { gate.remove(&target); } // window expired — clear the streak
+                    None => {}
+                }
+            }
             let session_id = uuid::Uuid::new_v4().to_string();
             state.sessions.lock().unwrap().insert(
                 session_id.clone(),
@@ -605,6 +657,18 @@ fn handle_text(state: &Arc<AppState>, conn: &mut ConnState, tx: &UnboundedSender
                 };
                 (session.controller_id.clone(), snap)
             };
+            // Feed the brute-force guard: a rejection (wrong PIN or declined)
+            // counts against the device; an accept clears its streak.
+            {
+                let mut gate = state.fail_gate.lock().unwrap();
+                if accepted {
+                    gate.remove(&identity.id);
+                } else {
+                    let now = now_ms();
+                    let e = gate.entry(identity.id.clone()).or_insert((0, now));
+                    if now.saturating_sub(e.1) >= PIN_FAIL_WINDOW_MS { *e = (1, now); } else { e.0 += 1; }
+                }
+            }
             if let Some(s) = &rejected_snap {
                 audit_session(state, s);
             }
@@ -615,7 +679,7 @@ fn handle_text(state: &Arc<AppState>, conn: &mut ConnState, tx: &UnboundedSender
             }));
         }
 
-        "offer" | "answer" | "ice_candidate" => {
+        "offer" | "answer" | "ice_candidate" | "e2e" => {
             let session_id = msg.get("sessionId").and_then(Value::as_str).unwrap_or("").to_string();
             let counterpart = {
                 let sessions = state.sessions.lock().unwrap();

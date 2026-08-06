@@ -17,7 +17,7 @@ gesture + a screen picker. A native binary captures the framebuffer directly
 2. **Encode** — H.264/VP8 the frames (hardware if available).
 3. **Native WebRTC** — `webrtc-rs` peer: add the encoded video track, do
    offer/answer/ICE.
-4. **Signaling** — connect to `wss://updesk.duckdns.org`, run the same Ed25519
+4. **Signaling** — connect to `wss://up-desk.online`, run the same Ed25519
    auth + register + incoming_request protocol as the other hosts.
 5. **Silent unattended** — auto-accept on the unattended password; no UI at all.
 6. **Service + input** — run as a Windows service (survives boot, reaches the

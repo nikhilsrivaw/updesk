@@ -6,12 +6,14 @@
 // auto-accepts silently and streams the screen.
 //
 //   UPDESK_PW  — unattended password (default "updesk")
-//   UPDESK_URL — signaling server (default wss://updesk.duckdns.org)
+//   UPDESK_URL — signaling server (default wss://up-desk.online)
 
 mod capture;
 mod input;
 #[cfg(windows)]
 mod service;
+#[cfg(windows)]
+mod mf_encoder;
 
 use anyhow::Result;
 use base64::Engine;
@@ -41,6 +43,8 @@ type WsWrite = futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<Tc
 type SharedWrite = Arc<Mutex<WsWrite>>;
 
 fn main() -> Result<()> {
+    #[cfg(windows)]
+    make_dpi_aware();
     // Subcommands for unattended service deployment; default = stream now.
     match std::env::args().nth(1).as_deref() {
         #[cfg(windows)]
@@ -55,28 +59,69 @@ fn main() -> Result<()> {
         Some("id") => {
             let identity = Identity::load();
             let id = numeric_id(&identity.id);
-            let pw = std::env::var("UPDESK_PW").unwrap_or_else(|_| "updesk".into());
+            let pw = load_password();
             let fmt = format!("{} {} {}", &id[0..3], &id[3..6], &id[6..9]);
             println!("Connect ID: {fmt}");
             println!("Password:   {pw}");
-            return Ok(());
+            // Also drop it in a file so installers/helpers can read it without
+            // re-running the exe, and force a clean exit (no lingering handles).
+            let _ = std::fs::write(data_dir().join("connect-id.txt"), format!("{fmt}\n"));
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            std::process::exit(0);
         }
         _ => {}
     }
     tokio::runtime::Runtime::new()?.block_on(stream_main())
 }
 
+// Declare the process PHYSICAL-pixel (per-monitor-v2) DPI aware, before any
+// capture. Without this, on a scaled/high-DPI desktop Windows reports the
+// *logical* resolution while DXGI captures the *physical* framebuffer, so we
+// only encode the top-left logical-sized region — the "whole screen isn't
+// visible" bug. Physical awareness makes display size and framebuffer match.
+#[cfg(windows)]
+fn make_dpi_aware() {
+    use windows::Win32::UI::HiDpi::{
+        SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    };
+    unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+}
+
 async fn stream_main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let url = std::env::var("UPDESK_URL").unwrap_or_else(|_| "wss://updesk.duckdns.org".into());
-    let password = std::env::var("UPDESK_PW").unwrap_or_else(|_| "updesk".into());
+    let url = std::env::var("UPDESK_URL").unwrap_or_else(|_| "wss://up-desk.online".into());
+    let password = load_password();
     let identity = Identity::load();
     println!("Native host identity: {}", identity.id);
 
     let api = Arc::new(build_api()?);
     let input_tx = input::spawn(); // dedicated input-injection thread
 
-    let (ws, _) = connect_async(&url).await?;
+    // Reconnect forever with capped backoff — a dropped connection (network
+    // blip, server restart, idle timeout) must never take an unattended host
+    // permanently offline.
+    let mut backoff = 1u64;
+    loop {
+        match run_connection(&url, &password, &identity, &api, &input_tx).await {
+            Ok(_) => { log_line("disconnected — reconnecting"); backoff = 1; }
+            Err(e) => log_line(&format!("connection failed: {e} — retrying in {backoff}s")),
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+        backoff = (backoff * 2).min(15);
+    }
+}
+
+async fn run_connection(
+    url: &str,
+    password: &str,
+    identity: &Identity,
+    api: &Arc<API>,
+    input_tx: &std::sync::mpsc::Sender<Value>,
+) -> Result<()> {
+    let (ws, _) = connect_async(url).await?;
     println!("Connected to {url}");
     let (write, mut read) = ws.split();
     let write: SharedWrite = Arc::new(Mutex::new(write));
@@ -93,7 +138,13 @@ async fn stream_main() -> Result<()> {
     let mut pc: Option<Arc<RTCPeerConnection>> = None;
 
     while let Some(msg) = read.next().await {
-        let text = match msg? { Message::Text(t) => t, Message::Close(_) => break, _ => continue };
+        let text = match msg? {
+            Message::Text(t) => t,
+            // Answer keepalive pings so the server's idle timeout never drops us.
+            Message::Ping(p) => { let mut w = write.lock().await; let _ = w.send(Message::Pong(p)).await; continue; }
+            Message::Close(_) => break,
+            _ => continue,
+        };
         let v: Value = match serde_json::from_str(&text) { Ok(v) => v, Err(_) => continue };
         match v["type"].as_str().unwrap_or("") {
             "auth_challenge" => {
@@ -117,18 +168,19 @@ async fn stream_main() -> Result<()> {
                 println!("   Password: {password}");
                 println!("   Controllers connect with these — no prompt here.");
                 println!("=======================================");
+                log_line(&format!("ONLINE — connect id {fmt}"));
             }
             "incoming_request" => {
                 let sid = v["sessionId"].as_str().unwrap_or("").to_string();
                 let supplied = v["pin"].as_str().unwrap_or("");
                 if supplied != password {
                     send(&write, json!({ "type": "session_response", "sessionId": sid, "accepted": false })).await?;
-                    println!("rejected a connection (wrong password)");
+                    log_line("rejected a connection (wrong password)");
                     continue;
                 }
-                println!("unattended connect accepted — streaming screen");
+                log_line("unattended connect accepted — streaming screen");
                 send(&write, json!({ "type": "session_response", "sessionId": sid, "accepted": true })).await?;
-                match start_session(&api, &write, sid.clone(), input_tx.clone()).await {
+                match start_session(api, &write, sid.clone(), input_tx.clone()).await {
                     Ok(new_pc) => pc = Some(new_pc),
                     Err(e) => eprintln!("session setup failed (host stays online): {e}"),
                 }
@@ -169,7 +221,7 @@ async fn start_session(api: &Arc<API>, write: &SharedWrite, sid: String, input_t
         ice_servers: vec![
             RTCIceServer { urls: vec!["stun:stun.l.google.com:19302".into()], ..Default::default() },
             RTCIceServer {
-                urls: vec!["turn:updesk.duckdns.org:3478".into()],
+                urls: vec!["turn:up-desk.online:3478".into()],
                 username: "updesk".into(),
                 credential: "updesk_turn_9fKq2mXz7L".into(),
                 credential_type: RTCIceCredentialType::Password,
@@ -220,7 +272,9 @@ async fn start_session(api: &Arc<API>, write: &SharedWrite, sid: String, input_t
                 ..Default::default()
             }).await {
                 Ok(_) => { n += 1; if n <= 3 || n % 30 == 0 { println!("[video] wrote sample {n} ({bytes} B)"); } }
-                Err(e) => { println!("[video] write_sample error: {e}"); break; }
+                // Don't stop the writer on a transient error — that would freeze
+                // the stream permanently. Skip the sample and keep going.
+                Err(e) => { if n % 30 == 0 { println!("[video] write_sample error: {e}"); } }
             }
         }
         println!("[video] writer stopped after {n} samples");
@@ -280,12 +334,46 @@ fn numeric_id(identity_id: &str) -> String {
     format!("{:09}", h % 1_000_000_000)
 }
 
-// --- stable Ed25519 identity, persisted next to the binary ---
+// Fixed per-machine data directory (C:\ProgramData\UpDesk), so identity +
+// config are the SAME whether the exe runs bare or is spawned by the service in
+// a different working directory — otherwise the connect ID silently changes.
+fn data_dir() -> std::path::PathBuf {
+    let base = std::env::var("ProgramData").unwrap_or_else(|_| ".".into());
+    let dir = std::path::Path::new(&base).join("UpDesk");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+// Append a line to the data-dir log. The service child runs windowless, so
+// println! goes nowhere — this file is how you see what it's doing.
+fn log_line(msg: &str) {
+    use std::io::Write;
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true).append(true).open(data_dir().join("native-host.log"))
+    {
+        let _ = writeln!(f, "[{secs}] {msg}");
+    }
+    println!("{msg}"); // still visible when run in a console
+}
+
+// Unattended password: prefer the config file (survives the service launch),
+// then the env var, then a default.
+fn load_password() -> String {
+    std::fs::read_to_string(data_dir().join("password.txt")).ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("UPDESK_PW").ok())
+        .unwrap_or_else(|| "updesk".into())
+}
+
+// --- stable Ed25519 identity, persisted in the data dir ---
 struct Identity { id: String, key: SigningKey }
 impl Identity {
     fn load() -> Self {
-        let path = "native-host-identity.txt";
-        if let Ok(s) = std::fs::read_to_string(path) {
+        let path = data_dir().join("identity.txt");
+        if let Ok(s) = std::fs::read_to_string(&path) {
             let mut lines = s.lines();
             if let (Some(id), Some(seed_b64)) = (lines.next(), lines.next()) {
                 if let Ok(seed) = base64::engine::general_purpose::STANDARD.decode(seed_b64.trim()) {
@@ -300,7 +388,7 @@ impl Identity {
         let key = SigningKey::generate(&mut rand::rngs::OsRng);
         let id = format!("nativehost-{:08x}", rand::random::<u32>());
         let seed_b64 = base64::engine::general_purpose::STANDARD.encode(key.to_bytes());
-        let _ = std::fs::write(path, format!("{id}\n{seed_b64}\n"));
+        let _ = std::fs::write(&path, format!("{id}\n{seed_b64}\n"));
         Identity { id, key }
     }
 

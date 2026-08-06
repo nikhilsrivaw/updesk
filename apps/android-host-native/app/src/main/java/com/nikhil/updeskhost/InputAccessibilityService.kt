@@ -1,0 +1,213 @@
+package com.nikhil.updeskhost
+
+import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
+import android.graphics.Path
+import android.os.Build
+import android.os.Bundle
+import android.util.DisplayMetrics
+import android.view.WindowManager
+import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
+import org.json.JSONObject
+
+/**
+ * Injects the controller's input into the phone via the Accessibility API — the
+ * same non-root technique RustDesk uses. The user enables this once in
+ * Settings → Accessibility; after that, taps/swipes/keys from the PC controller
+ * are dispatched as real gestures.
+ *
+ * Controller sends desktop-style events over the `input` data channel:
+ *   {kind:"mousedown"|"move"|"mouseup", x, y}   (x,y normalized 0..1)
+ *   {kind:"wheel", dy}
+ *   {kind:"keydown"|"keyup", key}
+ * We reconstruct a tap (down≈up) or a swipe (down→up) and dispatch it.
+ */
+class InputAccessibilityService : AccessibilityService() {
+
+    private var screenW = 0
+    private var screenH = 0
+
+    // Continuous-drag state (RustDesk-style willContinue stroke chaining).
+    private var currentStroke: GestureDescription.StrokeDescription? = null
+    private var lastX = 0f
+    private var lastY = 0f
+    private var dragging = false
+
+    override fun onServiceConnected() {
+        instance = this
+        val metrics = DisplayMetrics()
+        @Suppress("DEPRECATION")
+        (getSystemService(WINDOW_SERVICE) as WindowManager).defaultDisplay.getRealMetrics(metrics)
+        screenW = metrics.widthPixels
+        screenH = metrics.heightPixels
+    }
+
+    override fun onDestroy() { super.onDestroy(); if (instance === this) instance = null }
+    override fun onInterrupt() {}
+
+    /**
+     * Auto-confirm the system screen-capture dialog for unattended sharing. Only
+     * acts inside a short armed window (set right before we pop the dialog) and
+     * only on the SystemUI/android consent window, so it never clicks stray
+     * buttons in real apps. This is what lets the native host capture with no tap.
+     */
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (android.os.SystemClock.uptimeMillis() > projectionAutoConfirmUntil) return
+        val t = event?.eventType ?: return
+        if (t != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            t != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) return
+        tryConfirmProjection()
+    }
+
+    private fun tryConfirmProjection() {
+        val root = rootInActiveWindow ?: return
+        val pkg = root.packageName?.toString() ?: ""
+        if (pkg != "com.android.systemui" && pkg != "android") return
+        if (clickConfirm(root)) projectionAutoConfirmUntil = 0L // one-shot per grant
+    }
+
+    // Depth-first search for the confirm button, then click it (or its nearest
+    // clickable ancestor). Matching is loose but confined to the consent window.
+    private fun clickConfirm(node: AccessibilityNodeInfo?): Boolean {
+        if (node == null) return false
+        val label = ((node.text?.toString() ?: "") + "|" + (node.contentDescription?.toString() ?: "")).lowercase()
+        if (CONFIRM_LABELS.any { label.contains(it) }) {
+            var n: AccessibilityNodeInfo? = node
+            while (n != null) {
+                if (n.isClickable && n.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+                n = n.parent
+            }
+            if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+        }
+        for (i in 0 until node.childCount) {
+            if (clickConfirm(node.getChild(i))) return true
+        }
+        return false
+    }
+
+    /** Route one input event from the controller. */
+    fun handleInput(e: JSONObject) {
+        when (e.optString("kind")) {
+            "mousedown" -> beginDrag(px(e, "x", screenW), px(e, "y", screenH))
+            "move" -> if (dragging) continueDrag(px(e, "x", screenW), px(e, "y", screenH))
+            "mouseup" -> endDrag(px(e, "x", screenW), px(e, "y", screenH))
+            "wheel" -> wheel(e.optInt("dy"))
+            "nav" -> globalAction(e.optString("action"))
+            "keydown" -> {
+                // Esc maps to Back so the PC keyboard can navigate out of screens
+                // even before the controller shows dedicated nav buttons.
+                if (e.optString("key") == "Escape") globalAction("back") else typeKey(e.optString("key"))
+            }
+        }
+    }
+
+    /**
+     * System navigation via the accessibility framework — the same
+     * performGlobalAction() route RustDesk uses. Without this the controller can
+     * tap and type but can't press Back/Home/Recents, which makes driving a phone
+     * impossible. No root or device owner required.
+     */
+    private fun globalAction(action: String) {
+        val id = when (action) {
+            "back" -> GLOBAL_ACTION_BACK
+            "home" -> GLOBAL_ACTION_HOME
+            "recents" -> GLOBAL_ACTION_RECENTS
+            "notifications" -> GLOBAL_ACTION_NOTIFICATIONS
+            "quicksettings" -> GLOBAL_ACTION_QUICK_SETTINGS
+            "power" -> GLOBAL_ACTION_POWER_DIALOG
+            "lock" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) GLOBAL_ACTION_LOCK_SCREEN else return
+            else -> return
+        }
+        try { performGlobalAction(id) } catch (_: Throwable) {}
+    }
+
+    private fun px(e: JSONObject, k: String, span: Int) = (e.optDouble(k).toFloat()) * span
+
+    // --- continuous drag: down -> (moves) -> up chained into one gesture, so a
+    // slow drag scrolls/drags smoothly and a quick tiny one is just a tap. ---
+
+    private fun beginDrag(x: Float, y: Float) {
+        lastX = x; lastY = y; dragging = true
+        val path = Path().apply { moveTo(x, y); lineTo(x, y) }
+        currentStroke = GestureDescription.StrokeDescription(path, 0, SEG_MS, true)
+        dispatchStroke(currentStroke!!)
+    }
+
+    private fun continueDrag(x: Float, y: Float) {
+        val prev = currentStroke ?: return
+        val path = Path().apply { moveTo(lastX, lastY); lineTo(x, y) }
+        val next = try { prev.continueStroke(path, 0, SEG_MS, true) } catch (_: Throwable) {
+            GestureDescription.StrokeDescription(path, 0, SEG_MS, true)
+        }
+        currentStroke = next
+        lastX = x; lastY = y
+        dispatchStroke(next)
+    }
+
+    private fun endDrag(x: Float, y: Float) {
+        if (!dragging) return
+        dragging = false
+        val prev = currentStroke
+        val path = Path().apply { moveTo(lastX, lastY); lineTo(x, y) }
+        val finalStroke = try {
+            prev?.continueStroke(path, 0, SEG_MS, false)
+                ?: GestureDescription.StrokeDescription(path, 0, SEG_MS, false)
+        } catch (_: Throwable) {
+            GestureDescription.StrokeDescription(path, 0, SEG_MS, false)
+        }
+        dispatchStroke(finalStroke)
+        currentStroke = null
+    }
+
+    private fun wheel(dy: Int) {
+        // Vertical scroll as a swipe near screen centre (RustDesk WHEEL_STEP/DURATION).
+        val cx = screenW / 2f
+        val cy = screenH / 2f
+        val delta = if (dy > 0) WHEEL_STEP else -WHEEL_STEP
+        val path = Path().apply { moveTo(cx, cy); lineTo(cx, cy + delta) }
+        dispatchStroke(GestureDescription.StrokeDescription(path, 0, WHEEL_MS))
+    }
+
+    private fun dispatchStroke(stroke: GestureDescription.StrokeDescription) {
+        try {
+            dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
+        } catch (_: Throwable) { /* transient dispatch races are non-fatal */ }
+    }
+
+    // Basic text entry into the focused editable field. Replaces the field's
+    // text (accessibility limitation) — fine for the baseline; a dedicated IME
+    // comes later for proper cursor handling.
+    private fun typeKey(key: String) {
+        val node = findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return
+        val current = node.text?.toString() ?: ""
+        val next = when (key) {
+            "Backspace" -> if (current.isNotEmpty()) current.dropLast(1) else ""
+            "Enter" -> current + "\n"
+            " ", "Spacebar" -> "$current "
+            else -> if (key.length == 1) current + key else return
+        }
+        val args = Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, next)
+        }
+        node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+    }
+
+    companion object {
+        @Volatile var instance: InputAccessibilityService? = null
+        val isEnabled: Boolean get() = instance != null
+        private const val SEG_MS = 40L      // per drag segment
+        private const val WHEEL_STEP = 300f // scroll distance per wheel tick (px)
+        private const val WHEEL_MS = 80L
+
+        // Auto-confirm the capture dialog only during this armed window (uptime ms).
+        @Volatile var projectionAutoConfirmUntil = 0L
+        fun armProjectionAutoConfirm() {
+            projectionAutoConfirmUntil = android.os.SystemClock.uptimeMillis() + 12_000
+        }
+
+        // Confirm-button labels seen across Android versions / OEMs. Loose match,
+        // but only ever evaluated inside the SystemUI consent window.
+        private val CONFIRM_LABELS = listOf("start now", "start recording", "start capture", "start", "allow")
+    }
+}

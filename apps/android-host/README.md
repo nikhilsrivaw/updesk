@@ -2,7 +2,7 @@
 
 A native Android host that captures the phone's screen and streams it to your
 existing UpDesk **controller**, through the **same cloud signaling server**
-(`wss://updesk.duckdns.org`) and the same ID+PIN model. This baseline is
+(`wss://up-desk.online`) and the same ID+PIN model. This baseline is
 **screen-view first** — input (Accessibility/Knox/root) comes in later layers.
 
 ## What works in this baseline
